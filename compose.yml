@@ -1,0 +1,51 @@
+# Whole backend: `docker compose up -d --build`
+#
+# The app applies its own schema at startup (advisory-locked, idempotent), so
+# there is no separate migration step and no dependency on the Postgres image's
+# one-shot initdb hooks -- redeploying onto an existing volume works.
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      # This is the *owner/migration* role. The app itself never connects as it.
+      POSTGRES_USER: ${POSTGRES_USER:-diet_owner}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-diet}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-diet_owner} -d ${POSTGRES_DB:-diet}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    # Deliberately not published. Reach it with `docker compose exec db psql`.
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Runtime connection: unprivileged role, subject to row-level security.
+      DATABASE_URL: postgresql://${APP_DB_USER:-diet_app}:${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}@db:5432/${POSTGRES_DB:-diet}
+      # Migration connection: owner role, used only during startup.
+      MIGRATION_DATABASE_URL: postgresql://${POSTGRES_USER:-diet_owner}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-diet}
+      # Passwords the migration hands to CREATE/ALTER ROLE, so the roles in the
+      # database always match what .env says.
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+      READONLY_DB_PASSWORD: ${READONLY_DB_PASSWORD:-}
+      SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-720}
+      # Leave at 1 behind TLS. Set to 0 only to test over plain http.
+      COOKIE_SECURE: ${COOKIE_SECURE:-1}
+      MCP_PUBLIC_URL: ${MCP_PUBLIC_URL:-}
+      TZ: ${TZ:-UTC}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${APP_PORT:-8080}:8080"
+
+volumes:
+  pgdata:

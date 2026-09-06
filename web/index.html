@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diet log</title>
+<style>
+  :root {
+    --paper:   #edf0f1;
+    --card:    #f7f8f9;
+    --ink:     #16232b;
+    --ink-dim: #5d6d76;
+    --line:    #cfd6da;
+    --ok:      #2b6b5f;
+    --stale:   #9d6b1c;
+    --down:    #9a3a2c;
+    --focus:   #1f5f8b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #151b1f; --card: #1c2429; --ink: #e2e8ea; --ink-dim: #94a3aa;
+      --line: #2f3a41; --ok: #6fb6a4; --stale: #d3a457; --down: #d98274; --focus: #7fb6da;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2rem 1.25rem 4rem;
+    background: var(--paper); color: var(--ink);
+    font-family: "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 15px; line-height: 1.5;
+    font-variant-numeric: tabular-nums;
+  }
+  .wrap { max-width: 62rem; margin: 0 auto; }
+
+  header { display: flex; flex-wrap: wrap; gap: 1rem 2rem; align-items: baseline;
+           justify-content: space-between; padding-bottom: 1rem;
+           border-bottom: 1px solid var(--line); }
+  h1 { font-size: 1.35rem; font-weight: 600; letter-spacing: -0.01em; margin: 0; }
+  .who { color: var(--ink-dim); font-size: 0.9rem; display: flex; gap: 0.5rem; align-items: center; }
+  select { font: inherit; font-size: 0.9rem; color: var(--ink); background: var(--card);
+           border: 1px solid var(--line); border-radius: 3px; padding: 0.15rem 0.35rem; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+  .cols { display: grid; grid-template-columns: 19rem 1fr; gap: 2.5rem; margin-top: 2rem; }
+  @media (max-width: 44rem) { .cols { grid-template-columns: 1fr; gap: 2rem; } }
+
+  h2 { font-size: 0.95rem; font-weight: 600; margin: 0 0 0.75rem; }
+  .hint { color: var(--ink-dim); font-size: 0.85rem; margin: 0.75rem 0 0; }
+
+  /* the chain: one row per stage, in data-flow order */
+  .chain { list-style: none; margin: 0; padding: 0; }
+  .chain li { display: grid; grid-template-columns: 0.9rem 1fr auto; gap: 0.7rem;
+              align-items: start; padding: 0.55rem 0; position: relative; }
+  .chain li + li::before { content: ""; position: absolute; left: 0.38rem; top: -0.35rem;
+              height: 0.7rem; width: 1px; background: var(--line); }
+  .mark { width: 0.7rem; height: 0.7rem; margin-top: 0.32rem; border-radius: 2px;
+          border: 1.5px solid currentColor; }
+  .ok    { color: var(--ok); }    .ok .mark    { background: currentColor; }
+  .stale { color: var(--stale); } .stale .mark { background: linear-gradient(135deg, currentColor 50%, transparent 50%); }
+  .down  { color: var(--down); }  .down .mark  { background: none; }
+  .stage-name { color: var(--ink); font-weight: 500; }
+  .stage-detail { color: var(--ink-dim); font-size: 0.85rem; }
+  .lat { color: var(--ink-dim); font-size: 0.82rem; padding-top: 0.1rem; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+  th { text-align: right; font-weight: 500; color: var(--ink-dim); font-size: 0.82rem;
+       padding: 0 0 0.4rem; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child { text-align: left; }
+  td { padding: 0.45rem 0; border-bottom: 1px solid var(--line); text-align: right; }
+  tbody tr:last-child td { border-bottom: none; }
+  .est { border-bottom: 1px dotted var(--ink-dim); }
+  .neg { color: var(--ok); }
+  .pos { color: var(--down); }
+  .muted { color: var(--ink-dim); }
+
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 4px;
+           padding: 1rem 1.1rem; }
+  .panel h2 { margin-bottom: 0.35rem; }
+  .panel p { margin: 0.35rem 0 0; color: var(--ink-dim); font-size: 0.9rem; }
+  code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 0.85em; }
+
+  /* sign-in */
+  form.login { display: grid; gap: 0.7rem; max-width: 21rem; }
+  label { display: grid; gap: 0.2rem; font-size: 0.85rem; color: var(--ink-dim); }
+  input { font: inherit; color: var(--ink); background: var(--paper);
+          border: 1px solid var(--line); border-radius: 3px; padding: 0.35rem 0.45rem; }
+  button { font: inherit; font-size: 0.9rem; color: var(--ink); background: var(--card);
+           border: 1px solid var(--line); border-radius: 3px; padding: 0.3rem 0.75rem;
+           cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--ink-dim); }
+  button:disabled { opacity: 0.6; cursor: default; }
+  button.linkish { border: none; background: none; color: var(--focus);
+                   padding: 0; text-decoration: underline; }
+  .err { color: var(--down); font-size: 0.85rem; min-height: 1.2em; }
+  .est { border-bottom: 1px dotted var(--ink-dim); }
+  .partial { border-bottom: 1px dotted var(--stale); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>Diet log</h1>
+    <div class="who" id="who">Checking who you are…</div>
+  </header>
+
+  <!-- Shown only while signed out. -->
+  <div id="gate" hidden></div>
+
+  <div class="cols" id="cols" hidden>
+    <section aria-labelledby="chain-h">
+      <h2 id="chain-h">Where the data comes from</h2>
+      <ul class="chain" id="chain">
+        <li class="muted"><span class="mark"></span><span class="stage-name">Checking…</span></li>
+      </ul>
+      <p class="hint" id="chain-note"></p>
+    </section>
+
+    <section aria-labelledby="days-h">
+      <h2 id="days-h">Recent days</h2>
+      <div id="days">Loading…</div>
+    </section>
+  </div>
+
+</div>
+
+<script>
+"use strict";
+
+// Identity is the session cookie, set by POST /api/login and sent automatically.
+// There is no way to ask the server for somebody else's data: no endpoint takes
+// a user id at all. (The stub's ?as= switch is gone with the stub.)
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    ...options,
+    headers: { "Accept": "application/json", ...(options.headers || {}) },
+  });
+  let body = null;
+  try { body = await res.json(); } catch (_) { /* non-JSON error page */ }
+  if (!res.ok) {
+    throw Object.assign(new Error(body?.error || `${path} returned ${res.status}`),
+                        { code: res.status, payload: body });
+  }
+  return body;
+}
+
+const el = (id) => document.getElementById(id);
+
+function panel(target, title, detail) {
+  target.innerHTML = "";
+  const p = document.createElement("div");
+  p.className = "panel";
+  p.innerHTML = "<h2></h2><p></p>";
+  p.querySelector("h2").textContent = title;
+  p.querySelector("p").textContent = detail;
+  target.append(p);
+  return p;
+}
+
+// --- sign in ---------------------------------------------------------------
+
+function showLogin(message) {
+  el("cols").hidden = true;
+  el("who").textContent = "Not signed in";
+  const gate = el("gate");
+  gate.hidden = false;
+  gate.innerHTML = `
+    <div class="panel" style="max-width:26rem;margin-top:2rem">
+      <h2>Sign in</h2>
+      <form class="login" id="loginform">
+        <label>Email<input type="email" name="email" autocomplete="username" required></label>
+        <label>Password<input type="password" name="password" autocomplete="current-password" required></label>
+        <div class="err" id="loginerr"></div>
+        <div><button type="submit" id="loginbtn">Sign in</button></div>
+      </form>
+    </div>`;
+  if (message) el("loginerr").textContent = message;
+
+  el("loginform").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const form = new FormData(ev.target);
+    const btn = el("loginbtn");
+    btn.disabled = true;
+    el("loginerr").textContent = "";
+    try {
+      await api("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: form.get("email"), password: form.get("password") }),
+      });
+      gate.hidden = true;
+      gate.innerHTML = "";
+      boot();
+    } catch (err) {
+      el("loginerr").textContent =
+        err.code === 401 ? "That email and password did not match." :
+        err.code === 429 ? "Too many attempts. Wait a few minutes." :
+        `Sign-in failed: ${err.message}`;
+      btn.disabled = false;
+    }
+  });
+}
+
+function renderWho(me) {
+  const box = el("who");
+  box.textContent = "";
+  const name = document.createElement("span");
+  name.textContent = `${me.display_name} · ${me.timezone}`;
+  const out = document.createElement("button");
+  out.className = "linkish";
+  out.textContent = "Sign out";
+  out.addEventListener("click", async () => {
+    await api("/api/logout", { method: "POST" }).catch(() => {});
+    location.reload();
+  });
+  box.append(name, out);
+}
+
+// --- panels ----------------------------------------------------------------
+
+async function loadChain() {
+  const list = el("chain");
+  const note = el("chain-note");
+  const t0 = performance.now();
+  try {
+    const data = await api("/api/status");
+    list.innerHTML = "";
+    for (const s of data.stages) {
+      const li = document.createElement("li");
+      li.className = s.state;
+      li.innerHTML = `<span class="mark" aria-hidden="true"></span>
+        <span><span class="stage-name"></span><br><span class="stage-detail"></span></span>
+        <span class="lat"></span>`;
+      li.querySelector(".stage-name").textContent = s.stage;
+      li.querySelector(".stage-detail").textContent = `${s.state} — ${s.detail}`;
+      li.querySelector(".lat").textContent = s.ms == null ? "" : `${s.ms} ms`;
+      list.append(li);
+    }
+    note.textContent = `Round trip ${Math.round(performance.now() - t0)} ms.`;
+  } catch (err) {
+    panel(list.parentElement, "The page loaded but the API did not answer",
+      `${err.message}. The web server is serving files, so check that the app container is running and that nginx proxies /api/ to it.`);
+  }
+}
+
+const dash = '<span class="muted">—</span>';
+
+function dayRow(d) {
+  const known = d.energy_in_kcal != null && d.energy_out_kcal != null;
+  const bal = known ? d.energy_in_kcal - d.energy_out_kcal : null;
+  const inCell = d.energy_in_kcal == null ? dash
+    : `<span class="${d.intake_source === "claude-estimate" ? "est" : ""}">${d.energy_in_kcal}</span>`;
+  const outCell = d.energy_out_kcal == null ? dash
+    : d.energy_out_partial
+      ? `<span class="partial" title="active calories only — total not synced">${d.energy_out_kcal}</span>`
+      : `${d.energy_out_kcal}`;
+  return `<tr>
+    <td>${d.date}</td>
+    <td>${inCell}</td>
+    <td>${outCell}</td>
+    <td class="${bal == null ? "muted" : bal < 0 ? "neg" : "pos"}">${
+      bal == null ? dash : (bal > 0 ? "+" : "") + bal}</td>
+    <td>${d.weight_kg ?? dash}</td>
+    <td>${d.meals_logged}</td>
+  </tr>`;
+}
+
+async function loadDays() {
+  const box = el("days");
+  try {
+    const data = await api("/api/days?days=7");
+    if (!data.days.length) {
+      panel(box, "No days recorded yet",
+        "Log a meal through Claude, or run the Garmin sync, and the first row will appear here.");
+      return;
+    }
+    box.innerHTML = `<table>
+      <thead><tr><th>Date</th><th>In</th><th>Out</th><th>Balance</th><th>Weight</th><th>Meals</th></tr></thead>
+      <tbody>${data.days.map(dayRow).join("")}</tbody></table>
+      <p class="hint">Dates are days in ${data.timezone}. Underlined intake figures are
+      estimates from a meal description; everything else is measured.</p>`;
+  } catch (err) {
+    panel(box, "Could not load your days", err.code === 401
+      ? "Your session is not valid. Sign in again."
+      : `${err.message}. This is the database read path, so check the app's connection to Postgres.`);
+  }
+}
+
+// --- entry -----------------------------------------------------------------
+
+async function boot() {
+  let me;
+  try {
+    me = await api("/api/me");
+  } catch (err) {
+    if (err.code === 401) return showLogin();
+    el("who").textContent = "Cannot reach the API";
+    el("cols").hidden = false;
+    return panel(el("days"), "The API is not answering", err.message);
+  }
+  el("gate").hidden = true;
+  el("cols").hidden = false;
+  renderWho(me);
+  loadChain();
+  loadDays();
+}
+
+boot();
+</script>
+</body>
+</html>

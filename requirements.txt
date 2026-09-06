@@ -1,0 +1,4 @@
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+psycopg[binary,pool]==3.3.5
+argon2-cffi==25.1.0
