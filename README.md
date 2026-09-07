@@ -37,8 +37,19 @@ location / {
     proxy_set_header Host              $host;
     proxy_set_header X-Forwarded-For   $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
+
+    # Required for MCP: responses are streamed, and buffering them is the most
+    # common cause of a client that connects but never receives anything.
+    proxy_http_version 1.1;
+    proxy_set_header Connection '';
+    proxy_buffering off;
+    proxy_read_timeout 300s;
 }
 ```
+
+Do not put CDN bot-protection in front of `/mcp`. Anthropic's egress range is
+`160.79.104.0/21`, and a WAF that lets the OAuth traffic through while blocking
+the authenticated POSTs produces a failure that is invisible in origin logs.
 
 `X-Forwarded-For` matters: it is what the login rate limiter counts against.
 
@@ -53,9 +64,36 @@ location / {
 | `GET` | `/api/me` | the signed-in user |
 | `GET` | `/api/status` | the chain the page draws, every line measured |
 | `GET` | `/api/days?days=7` | per-day intake, expenditure, weight |
+| `POST` | `/mcp` | the MCP server, for Claude — bearer token |
 
-No endpoint takes a user id. There is no argument by which a client — or a
-model on a future MCP tool — can name anyone but itself.
+No endpoint takes a user id, and neither does any MCP tool. There is no
+argument by which a client — or a model driving a tool — can name anyone but
+itself.
+
+## MCP
+
+Five tools at `POST /mcp`: `log_meal`, `correct_meal`, `get_day`, `get_range`,
+`query_sql`. Authentication is a bearer token today; OAuth for Claude.ai custom
+connectors is the next piece.
+
+```sh
+docker compose exec app python -m app.manage issue-token you@example.com --label laptop
+claude mcp add --transport http diet https://your-host/mcp \
+  --header "Authorization: Bearer <the token>"
+```
+
+`query_sql` connects as `diet_ro` — SELECT only, row-level security still
+applies, and it cannot see the `auth` schema at all. It additionally runs in a
+read-only transaction with a statement timeout, which is what stops
+`WITH x AS (UPDATE ...) SELECT * FROM x` from sneaking past the SELECT check.
+If `READONLY_DB_PASSWORD` is empty the tool simply isn't offered; everything
+else still works.
+
+**The path must stay exactly `/mcp`.** Claude.ai has a documented failure where
+a connector completes the OAuth handshake and then sends no traffic at all when
+the endpoint sits deeper than one path segment. For the same family of reasons
+the mount is arranged so that a bare `POST /mcp` is served directly rather than
+redirected to `/mcp/` — a method-preserving redirect there breaks the handshake.
 
 ## Admin
 
@@ -63,6 +101,9 @@ model on a future MCP tool — can name anyone but itself.
 docker compose exec app python -m app.manage adduser <email> <name> [timezone]
 docker compose exec app python -m app.manage passwd <email>      # also revokes sessions
 docker compose exec app python -m app.manage seed-demo <email>   # sample rows for the UI
+docker compose exec app python -m app.manage issue-token <email> [--label L] [--days N]
+docker compose exec app python -m app.manage list-tokens
+docker compose exec app python -m app.manage revoke-token <email> <label>
 docker compose exec db psql -U diet_owner diet
 ```
 
@@ -73,7 +114,10 @@ app/schema.sql   the whole database: roles, tables, RLS policies, grants
 app/db.py        the pool and the two transaction wrappers (the only cursors)
 app/auth.py      passwords, sessions, the login throttle
 app/queries.py   read queries — none of them filters by user, RLS already did
-app/main.py      routes
+app/writes.py    the write paths; rows are stamped by diet.current_user_id()
+app/mcp_server.py  the five MCP tools
+app/mcp_auth.py  bearer-token verification against auth.api_tokens
+app/main.py      routes, and the /mcp mount
 app/manage.py    admin CLI
 web/index.html   the frontend
 stub_api.py      superseded; kept only as a no-database way to serve the page
@@ -85,7 +129,7 @@ stub_api.py      superseded; kept only as a no-database way to serve the page
 | --- | --- | --- |
 | `diet_owner` | migrations, admin CLI | everything; the app never connects as it |
 | `diet_app` | the running app | DML on `diet.*` under RLS; `auth.*` only via four definer functions |
-| `diet_ro` | the future MCP `query_sql` tool | `SELECT` on `diet.*` under RLS; cannot see `auth.*` at all |
+| `diet_ro` | the MCP `query_sql` tool | `SELECT` on `diet.*` under RLS; cannot see `auth.*` at all |
 
 Passwords for the latter two come from `.env` and are re-applied on every
 startup, so rotating one is an edit and a restart.

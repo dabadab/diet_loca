@@ -35,10 +35,15 @@ services:
       DATABASE_URL: postgresql://${APP_DB_USER:-diet_app}:${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}@db:5432/${POSTGRES_DB:-diet}
       # Migration connection: owner role, used only during startup.
       MIGRATION_DATABASE_URL: postgresql://${POSTGRES_USER:-diet_owner}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-diet}
+      # Third connection: the read-only role, used only by the MCP query_sql
+      # tool. Left unset if READONLY_DB_PASSWORD is empty, which simply hides
+      # that one tool.
+      READONLY_DATABASE_URL: ${READONLY_DB_PASSWORD:+postgresql://diet_ro:${READONLY_DB_PASSWORD}@db:5432/${POSTGRES_DB:-diet}}
       # Passwords the migration hands to CREATE/ALTER ROLE, so the roles in the
       # database always match what .env says.
       APP_DB_PASSWORD: ${APP_DB_PASSWORD}
       READONLY_DB_PASSWORD: ${READONLY_DB_PASSWORD:-}
+      MCP_ENABLED: ${MCP_ENABLED:-1}
       SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-720}
       # Leave at 1 behind TLS. Set to 0 only to test over plain http.
       COOKIE_SECURE: ${COOKIE_SECURE:-1}

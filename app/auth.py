@@ -129,3 +129,28 @@ def end_session(raw_token: str | None) -> None:
         return
     with db.auth_tx() as cur:
         cur.execute("SELECT auth.session_delete(%s)", (_digest(raw_token),))
+
+
+# --- MCP bearer tokens -----------------------------------------------------
+# Same shape as sessions, for clients that hold a long-lived credential instead
+# of a cookie. Minting is deliberately not here: it is an owner-connection
+# operation in manage.py, so the app role can look a token up but can never
+# issue one.
+
+
+def new_api_token() -> tuple[str, bytes]:
+    """Returns (value to hand out once, digest to store). No database access."""
+    raw = secrets.token_urlsafe(TOKEN_BYTES)
+    return raw, _digest(raw)
+
+
+def resolve_api_token(raw_token: str | None) -> User | None:
+    """Bearer token in, identity out. The MCP equivalent of resolve()."""
+    if not raw_token:
+        return None
+    with db.auth_tx() as cur:
+        cur.execute("SELECT * FROM auth.token_lookup(%s)", (_digest(raw_token),))
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return User(str(row["user_id"]), row["email"], row["display_name"], row["timezone"])

@@ -95,3 +95,71 @@ def sync_snapshot(cur) -> dict:
     """)
     counts = dict(cur.fetchone())
     return {"connectors": connectors, "counts": counts}
+
+
+# Mirrors the measurements_metric_known CHECK in schema.sql. Kept here so a
+# tool can reject an unknown metric with a helpful list instead of letting the
+# constraint fire, and so the two lists are obviously meant to match.
+KNOWN_METRICS = ("weight_kg", "resting_hr", "sleep_minutes", "steps",
+                 "active_kcal", "total_kcal", "body_fat_pct")
+
+
+def day_detail(cur, local_date) -> dict:
+    """Everything recorded for one calendar day, in the user's own timezone."""
+    cur.execute("""
+        SELECT m.meal_id, m.eaten_at, m.description, m.source, m.created_at,
+               coalesce(
+                 json_agg(json_build_object(
+                   'food', i.food, 'grams', i.grams, 'kcal', i.kcal,
+                   'protein_g', i.protein_g, 'carb_g', i.carb_g, 'fat_g', i.fat_g,
+                   'confidence', i.confidence
+                 ) ORDER BY i.item_id) FILTER (WHERE i.item_id IS NOT NULL),
+                 '[]'::json) AS items,
+               coalesce(sum(i.kcal), 0)::float AS kcal
+        FROM diet.meals m
+        LEFT JOIN diet.meal_items i ON i.meal_id = m.meal_id
+        WHERE m.local_date = %(d)s AND m.superseded_by IS NULL
+        GROUP BY m.meal_id, m.eaten_at, m.description, m.source, m.created_at
+        ORDER BY m.eaten_at
+    """, {"d": local_date})
+    meals = []
+    for r in cur.fetchall():
+        row = dict(r)
+        row["meal_id"] = str(row["meal_id"])
+        row["eaten_at"] = row["eaten_at"].isoformat()
+        row["created_at"] = row["created_at"].isoformat()
+        meals.append(row)
+
+    cur.execute("""
+        SELECT metric, value, unit, source, ts_utc
+        FROM diet.measurements
+        WHERE local_date = %(d)s
+        ORDER BY metric
+    """, {"d": local_date})
+    measurements = [
+        {**dict(r), "ts_utc": r["ts_utc"].isoformat()} for r in cur.fetchall()
+    ]
+
+    return {
+        "date": str(local_date),
+        "meals": meals,
+        "measurements": measurements,
+        "energy_in_kcal": round(sum(m["kcal"] for m in meals)) if meals else None,
+    }
+
+
+def range_metrics(cur, from_date, to_date, metrics: list[str] | None = None) -> list[dict]:
+    """Measured series over a date range. Estimated data is not in here by design."""
+    wanted = list(metrics) if metrics else list(KNOWN_METRICS)
+    unknown = [m for m in wanted if m not in KNOWN_METRICS]
+    if unknown:
+        raise ValueError(
+            f"unknown metric(s) {unknown}; known metrics are {list(KNOWN_METRICS)}")
+
+    cur.execute("""
+        SELECT local_date, metric, value, unit, source
+        FROM diet.measurements
+        WHERE local_date BETWEEN %(a)s AND %(b)s AND metric = ANY(%(m)s)
+        ORDER BY local_date, metric
+    """, {"a": from_date, "b": to_date, "m": wanted})
+    return [{**dict(r), "local_date": r["local_date"].isoformat()} for r in cur.fetchall()]

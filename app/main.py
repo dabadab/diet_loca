@@ -16,6 +16,7 @@ from datetime import datetime, timezone as dt_timezone
 
 import psycopg
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastmcp.utilities.lifespan import combine_lifespans
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
@@ -38,15 +39,42 @@ async def lifespan(_: FastAPI):
     else:
         log.info("MIGRATION_DATABASE_URL unset; assuming the schema is managed elsewhere")
     db.open_pool(settings.database_url, max_size=settings.pool_max_size)
+    if settings.query_sql_enabled:
+        try:
+            db.open_ro_pool(settings.readonly_database_url)
+            log.info("read-only pool open; query_sql available")
+        except Exception as exc:
+            # One optional tool is not worth refusing to start for.
+            log.warning("read-only pool unavailable, query_sql disabled: %s", exc)
+    else:
+        log.info("READONLY_DATABASE_URL unset; the query_sql tool is disabled")
     log.info("ready")
     try:
         yield
     finally:
+        db.close_ro_pool()
         db.close_pool()
 
 
+# The MCP server is mounted at exactly /mcp, one path segment deep. That is not
+# cosmetic: Claude.ai has a documented failure where the connector completes the
+# OAuth handshake and then sends no traffic at all when the path is deeper.
+if settings.mcp_enabled:
+    from .mcp_server import mcp as _mcp
+
+    # path="/mcp" here, not "/", and mounted at "/" below. The obvious shape
+    # (http_app(path="/") mounted at "/mcp") makes Starlette 307-redirect a bare
+    # POST /mcp to /mcp/ -- a method-preserving redirect on the exact URL the
+    # connector posts to, which is a documented way to break the handshake.
+    _mcp_app = _mcp.http_app(path=settings.mcp_path)
+    # Both lifespans have to run: ours opens the database pools, FastMCP's
+    # starts the session manager. Nested lifespans are not picked up.
+    _lifespan = combine_lifespans(lifespan, _mcp_app.lifespan)
+else:
+    _mcp_app, _lifespan = None, lifespan
+
 app = FastAPI(title="Diet tracker", docs_url=None, redoc_url=None,
-              openapi_url=None, lifespan=lifespan)
+              openapi_url=None, lifespan=_lifespan)
 
 
 # --- plumbing --------------------------------------------------------------
@@ -60,6 +88,11 @@ async def http_error(_: Request, exc: HTTPException):
 
 @app.middleware("http")
 async def headers(request: Request, call_next):
+    # MCP responses are streamed and are not browser documents: a CSP header is
+    # meaningless on them, and turning a mid-stream error into a JSON body would
+    # corrupt the transport. Let them through untouched.
+    if request.url.path.startswith(settings.mcp_path):
+        return await call_next(request)
     try:
         response = await call_next(request)
     except psycopg.Error as exc:           # pool exhausted, database gone, ...
@@ -235,16 +268,33 @@ def status(user: auth.User = Depends(current_user)):
         stages.append({"stage": "Garmin sync", "state": state,
                        "detail": detail, "ms": None})
 
-    if not settings.mcp_public_url:
+    # Read from sync_state, which only an actual MCP tool call writes. The
+    # earlier version inferred this from claude-estimate meals, which seed-demo
+    # also produces -- so it would have reported a connector that was never
+    # there.
+    if not settings.mcp_enabled:
         stages.append({"stage": "Claude connector", "state": "down",
-                       "detail": "MCP server not deployed yet", "ms": None})
+                       "detail": "MCP server disabled on this instance", "ms": None})
     else:
-        last = counts["last_claude_write"]
-        stages.append({
-            "stage": "Claude connector",
-            "state": "ok" if last else "stale",
-            "detail": (f"registered at {settings.mcp_public_url}; "
-                       f"last meal written {_ago(last)}"),
-            "ms": None})
+        mcp_state = snap["connectors"].get("claude-mcp")
+        where = settings.mcp_public_url or f"mounted at {settings.mcp_path}"
+        if mcp_state is None or mcp_state["last_success_at"] is None:
+            stages.append({
+                "stage": "Claude connector", "state": "stale",
+                "detail": f"{where}; no tool has been called yet", "ms": None})
+        else:
+            age_h = (mcp_state["success_age_s"] or 0) / 3600
+            stages.append({
+                "stage": "Claude connector",
+                "state": "ok" if age_h < 24 * 14 else "stale",
+                "detail": f"{where}; last tool call {_ago(mcp_state['last_success_at'])}",
+                "ms": None})
 
     return {"checked_at": time.time(), "stages": stages}
+
+
+# Mounted at "/" but registered last: Starlette matches routes in order, so
+# every route above wins and only unmatched paths reach the MCP app, which
+# serves the one route it has at exactly /mcp.
+if _mcp_app is not None:
+    app.mount("/", _mcp_app)

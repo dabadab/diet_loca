@@ -129,6 +129,62 @@ def cmd_seed_demo(args) -> None:
     print(f"seeded {args.days} days for {args.email}")
 
 
+def cmd_issue_token(args) -> None:
+    """Mint an MCP bearer token. Printed once, stored only as a digest."""
+    raw, digest = auth.new_api_token()
+    expires = (datetime.now(timezone.utc) + timedelta(days=args.days)) if args.days else None
+    with _owner_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT user_id FROM auth.users WHERE email = lower(%s)", (args.email,))
+        row = cur.fetchone()
+        if row is None:
+            sys.exit(f"no such user: {args.email}")
+        try:
+            cur.execute(
+                """INSERT INTO auth.api_tokens (token_hash, user_id, label, expires_at)
+                   VALUES (%s, %s, %s, %s)""",
+                (digest, row["user_id"], args.label, expires))
+        except psycopg.errors.UniqueViolation:
+            sys.exit(f"a token labelled {args.label!r} already exists for {args.email}; "
+                     "revoke it first or pick another label")
+        conn.commit()
+
+    print(f"label   {args.label}")
+    print(f"expires {expires.isoformat() if expires else 'never'}")
+    print("\nThis is shown once and is not recoverable:\n")
+    print(f"  {raw}\n")
+    print("Use it as:  Authorization: Bearer <token>")
+
+
+def cmd_list_tokens(args) -> None:
+    with _owner_conn() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT u.email, t.label, t.created_at, t.last_used_at,
+                              t.expires_at, t.revoked_at
+                       FROM auth.api_tokens t JOIN auth.users u USING (user_id)
+                       ORDER BY u.email, t.created_at""")
+        rows = cur.fetchall()
+    if not rows:
+        return print("no tokens issued")
+    for r in rows:
+        state = ("revoked" if r["revoked_at"]
+                 else "expired" if r["expires_at"] and r["expires_at"] < datetime.now(timezone.utc)
+                 else "active")
+        used = r["last_used_at"].strftime("%Y-%m-%d %H:%M") if r["last_used_at"] else "never used"
+        print(f"  {state:8} {r['email']:26} {r['label']:20} {used}")
+
+
+def cmd_revoke_token(args) -> None:
+    with _owner_conn() as conn, conn.cursor() as cur:
+        cur.execute("""UPDATE auth.api_tokens SET revoked_at = now()
+                       WHERE label = %s AND revoked_at IS NULL
+                         AND user_id = (SELECT user_id FROM auth.users
+                                        WHERE email = lower(%s))""",
+                    (args.label, args.email))
+        if cur.rowcount == 0:
+            sys.exit(f"no active token labelled {args.label!r} for {args.email}")
+        conn.commit()
+    print(f"revoked {args.label}; it stops working on the next request")
+
+
 # (description, [(food, grams, kcal, protein_g, carb_g, fat_g)])
 _DEMO_MEALS = [
     ("porridge with milk and a banana", [
@@ -160,6 +216,21 @@ def main() -> None:
     s.add_argument("email")
     s.add_argument("--days", type=int, default=7)
     s.set_defaults(fn=cmd_seed_demo)
+
+    t = sub.add_parser("issue-token", help="mint an MCP bearer token")
+    t.add_argument("email")
+    t.add_argument("--label", default="mcp", help="a name you can revoke by")
+    t.add_argument("--days", type=int, default=0,
+                   help="expiry in days; 0 (the default) means no expiry")
+    t.set_defaults(fn=cmd_issue_token)
+
+    lt = sub.add_parser("list-tokens", help="show issued MCP tokens")
+    lt.set_defaults(fn=cmd_list_tokens)
+
+    rt = sub.add_parser("revoke-token", help="revoke an MCP bearer token")
+    rt.add_argument("email")
+    rt.add_argument("label")
+    rt.set_defaults(fn=cmd_revoke_token)
 
     args = ap.parse_args()
     args.fn(args)

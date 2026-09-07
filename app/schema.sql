@@ -46,6 +46,12 @@ BEGIN
 END
 $roles$;
 
+-- Belt and braces on the read-only role: even a psql session as diet_ro cannot
+-- open a writing transaction, and no single query can run away.
+ALTER ROLE diet_ro SET default_transaction_read_only = on;
+ALTER ROLE diet_ro SET statement_timeout = '15s';
+ALTER ROLE diet_ro SET idle_in_transaction_session_timeout = '30s';
+
 -- ------------------------------------------------------------- identity ---
 
 CREATE OR REPLACE FUNCTION diet.current_user_id() RETURNS uuid
@@ -115,11 +121,29 @@ CREATE TABLE IF NOT EXISTS auth.sessions (
 CREATE INDEX IF NOT EXISTS sessions_user_idx    ON auth.sessions (user_id);
 CREATE INDEX IF NOT EXISTS sessions_expires_idx ON auth.sessions (expires_at);
 
+-- Long-lived bearer tokens for MCP clients that cannot do OAuth (Claude Code,
+-- MCP Inspector, scripts). Same discipline as sessions: opaque token, only its
+-- sha256 stored, revocable, never readable by the app role.
+CREATE TABLE IF NOT EXISTS auth.api_tokens (
+  token_hash   bytea PRIMARY KEY,
+  user_id      uuid NOT NULL REFERENCES auth.users(user_id) ON DELETE CASCADE,
+  label        text NOT NULL CHECK (length(label) BETWEEN 1 AND 100),
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  last_used_at timestamptz,
+  expires_at   timestamptz,          -- NULL means no expiry
+  revoked_at   timestamptz,
+  -- so a token can be revoked by a name a human can actually remember
+  UNIQUE (user_id, label)
+);
+
+CREATE INDEX IF NOT EXISTS api_tokens_user_idx ON auth.api_tokens (user_id);
+
 -- RLS here is a backstop: the app role reaches these tables only through the
 -- SECURITY DEFINER functions below. Not FORCEd, so owner-run admin tooling
 -- (creating a user, resetting a password) still works.
 ALTER TABLE auth.users    ENABLE ROW LEVEL SECURITY;
 ALTER TABLE auth.sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE auth.api_tokens ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS users_self ON auth.users;
 CREATE POLICY users_self ON auth.users
@@ -128,6 +152,11 @@ CREATE POLICY users_self ON auth.users
 
 DROP POLICY IF EXISTS sessions_own ON auth.sessions;
 CREATE POLICY sessions_own ON auth.sessions
+  USING (user_id = diet.current_user_id())
+  WITH CHECK (user_id = diet.current_user_id());
+
+DROP POLICY IF EXISTS api_tokens_own ON auth.api_tokens;
+CREATE POLICY api_tokens_own ON auth.api_tokens
   USING (user_id = diet.current_user_id())
   WITH CHECK (user_id = diet.current_user_id());
 
@@ -199,6 +228,37 @@ CREATE FUNCTION auth.session_delete(p_token_hash bytea)
   LANGUAGE sql SECURITY DEFINER
   SET search_path = pg_catalog, auth
   AS $fn$ DELETE FROM auth.sessions WHERE token_hash = p_token_hash $fn$;
+
+DROP FUNCTION IF EXISTS auth.token_lookup(bytea);
+CREATE FUNCTION auth.token_lookup(p_token_hash bytea)
+  RETURNS TABLE (user_id uuid, email text, display_name text,
+                 timezone text, label text)
+  LANGUAGE plpgsql SECURITY DEFINER
+  SET search_path = pg_catalog, auth
+  AS $fn$
+  #variable_conflict use_column
+  BEGIN
+    -- Throttled, as for sessions: a chatty MCP client is not one UPDATE per call.
+    UPDATE auth.api_tokens t SET last_used_at = now()
+     WHERE t.token_hash = p_token_hash
+       AND t.revoked_at IS NULL
+       AND (t.expires_at IS NULL OR t.expires_at > now())
+       AND (t.last_used_at IS NULL OR t.last_used_at < now() - interval '5 minutes');
+
+    RETURN QUERY
+      SELECT u.user_id, u.email, u.display_name, u.timezone, t.label
+      FROM auth.api_tokens t
+      JOIN auth.users u ON u.user_id = t.user_id
+      WHERE t.token_hash = p_token_hash
+        AND t.revoked_at IS NULL
+        AND (t.expires_at IS NULL OR t.expires_at > now())
+        AND u.is_active;
+  END
+  $fn$;
+
+-- Minting and revoking are admin operations: manage.py does them over the
+-- owner connection. The app role gets lookup and nothing else, so a compromised
+-- app process cannot issue itself a token.
 
 DROP FUNCTION IF EXISTS auth.user_timezone(uuid);
 CREATE FUNCTION auth.user_timezone(p_user_id uuid)
@@ -393,12 +453,14 @@ REVOKE ALL ON FUNCTION auth.login_lookup(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION auth.session_create(uuid, bytea, interval, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION auth.session_lookup(bytea) FROM PUBLIC;
 REVOKE ALL ON FUNCTION auth.session_delete(bytea) FROM PUBLIC;
+REVOKE ALL ON FUNCTION auth.token_lookup(bytea) FROM PUBLIC;
 REVOKE ALL ON FUNCTION auth.user_timezone(uuid) FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION auth.login_lookup(text) TO diet_app;
 GRANT EXECUTE ON FUNCTION auth.session_create(uuid, bytea, interval, text) TO diet_app;
 GRANT EXECUTE ON FUNCTION auth.session_lookup(bytea) TO diet_app;
 GRANT EXECUTE ON FUNCTION auth.session_delete(bytea) TO diet_app;
+GRANT EXECUTE ON FUNCTION auth.token_lookup(bytea) TO diet_app;
 GRANT EXECUTE ON FUNCTION auth.user_timezone(uuid) TO diet_app;
 GRANT EXECUTE ON FUNCTION diet.current_user_id() TO diet_app, diet_ro;
 

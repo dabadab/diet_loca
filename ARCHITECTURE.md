@@ -34,6 +34,12 @@ is no separate migration step.
 - `web/index.html` — the frontend, now with a sign-in form. The `?as=` user
   switch is gone; the shape of every API response is unchanged from the stub
   except that `energy_out_kcal` may be null (see below).
+- `app/mcp_server.py` — the five MCP tools, mounted at `/mcp`. Identity comes
+  from a bearer token verified against `auth.api_tokens`; no tool takes a user
+  id, and every tool body runs inside one of the transaction wrappers.
+- `app/writes.py` — the first write paths in the project. Rows are stamped with
+  `diet.current_user_id()` in SQL rather than with a value passed from Python,
+  so there is no argument anywhere by which a caller could name a user.
 - `stub_api.py` — superseded, kept only as a no-database way to serve the page.
   Do not deploy it; its identity still comes from a client-supplied header.
 
@@ -137,11 +143,29 @@ already a Grafana/VictoriaMetrics stack to hang it off — catches it.
 
 ## MCP tools (surface kept intentionally small)
 
-- `log_meal(description, eaten_at, items[])`
-- `correct_meal(meal_id, ...)`
-- `get_day(date)`
-- `get_range(from, to, metrics[])`
+Built, on FastMCP 4, and verified against Postgres 13 and 17:
+
+- `log_meal(description, items[], eaten_at?)` — the user's words and the model's
+  parse are both kept; `raw_analysis` holds the estimate verbatim
+- `correct_meal(meal_id, ...)` — append-only; returns the new id, refuses a meal
+  that has already been corrected and points at the current head
+- `get_day(date?)` — meals with items plus that day's measurements
+- `get_range(from?, to?, metrics[]?)` — measured series only
 - `query_sql(sql)` — separate **read-only** Postgres role, RLS still applies
+
+Two things the testing changed. The `SELECT`-prefix check on `query_sql` is not
+sufficient on its own — `WITH x AS (UPDATE ... RETURNING 1) SELECT * FROM x`
+passes it — so the wrapper also opens a read-only transaction, and that is what
+actually refuses the write. And the status panel's "Claude connector" line now
+reads `sync_state`, which only a real tool call writes; it used to infer from
+`claude-estimate` meals, which `seed-demo` also produces, so it would have
+reported a connector that had never existed.
+
+Auth is a bearer token in `auth.api_tokens`, built like sessions: opaque, stored
+only as a digest, revocable, expiring. Minting is an owner-connection operation
+in `manage.py`, so the app role can look a token up but cannot issue one. It
+stays after OAuth arrives, composed under FastMCP's `MultiAuth`, so scripts and
+Claude Code keep working against the same server Claude.ai talks to.
 
 ## Frontend
 
@@ -166,9 +190,18 @@ primary UI.
   per-user last-success (the status panel already reads it), and
   `diet.garmin_credentials` holds ciphertext with the key outside the database.
   No poller code exists yet, and no encryption code either.
-- The MCP server. `diet_ro` exists and is proven to be read-only and
-  RLS-scoped; nothing connects as it yet. Setting `MCP_PUBLIC_URL` is what
-  turns the status panel's last line green.
+- **OAuth for the Claude.ai connector.** The tools work today over a bearer
+  token, which Claude Code and MCP Inspector accept but claude.ai (mostly) does
+  not. Plan: FastMCP's `OAuthProvider`, ported from its `InMemoryOAuthProvider`
+  reference implementation onto Postgres tables, with the consent step reusing
+  the existing session cookie so it really is the same accounts either way.
+  Note that the current MCP spec revision deprecates Dynamic Client
+  Registration in favour of Client ID Metadata Documents, while Claude.ai's
+  out-of-the-box path and FastMCP's base provider are both still DCR.
+- Anthropic now documents a `static_headers` connector auth type in beta. If
+  the org has it, the bearer token above may be enough and the OAuth work can
+  wait; there is at least one report of the beta ignoring the header and
+  falling back to OAuth anyway.
 - Login is single-factor with an in-process rate limiter. That limiter is
   per-container, so it stops counting correctly the moment there is more than
   one app replica.
