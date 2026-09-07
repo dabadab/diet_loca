@@ -185,6 +185,52 @@ def cmd_revoke_token(args) -> None:
     print(f"revoked {args.label}; it stops working on the next request")
 
 
+def cmd_list_connections(args) -> None:
+    """Which OAuth clients hold live tokens, and for whom."""
+    with _owner_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT u.email, c.client_id, coalesce(c.client_name, '?') AS client_name,
+                   count(*) FILTER (WHERE t.kind = 'access'
+                                      AND t.revoked_at IS NULL
+                                      AND (t.expires_at IS NULL OR t.expires_at > now())) AS live_access,
+                   count(*) FILTER (WHERE t.kind = 'refresh' AND t.revoked_at IS NULL) AS live_refresh,
+                   max(t.issued_at) AS last_issued
+            FROM auth.oauth_tokens t
+            JOIN auth.users u USING (user_id)
+            JOIN auth.oauth_clients c USING (client_id)
+            GROUP BY u.email, c.client_id, c.client_name
+            ORDER BY max(t.issued_at) DESC""")
+        rows = cur.fetchall()
+    if not rows:
+        return print("no OAuth connections")
+    for r in rows:
+        print(f"  {r['email']:26} {r['client_name']:14} {r['client_id']}")
+        print(f"  {'':26} access={r['live_access']} refresh={r['live_refresh']} "
+              f"last issued {r['last_issued']:%Y-%m-%d %H:%M}")
+
+
+def cmd_revoke_connection(args) -> None:
+    """
+    Cut a connector off from this side.
+
+    The OAuth revocation endpoint depends on the client choosing to call it.
+    This does not: it kills the tokens directly, so disconnecting never relies
+    on the cooperation of the thing being disconnected.
+    """
+    with _owner_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            UPDATE auth.oauth_tokens SET revoked_at = now()
+            WHERE revoked_at IS NULL
+              AND user_id = (SELECT user_id FROM auth.users WHERE email = lower(%s))
+              AND (%s::text IS NULL OR client_id = %s)""",
+            (args.email, args.client_id, args.client_id))
+        n = cur.rowcount
+        conn.commit()
+    if n == 0:
+        sys.exit(f"nothing to revoke for {args.email}")
+    print(f"revoked {n} token(s); the connector must go through consent again")
+
+
 # (description, [(food, grams, kcal, protein_g, carb_g, fat_g)])
 _DEMO_MEALS = [
     ("porridge with milk and a banana", [
@@ -231,6 +277,15 @@ def main() -> None:
     rt.add_argument("email")
     rt.add_argument("label")
     rt.set_defaults(fn=cmd_revoke_token)
+
+    lc = sub.add_parser("list-connections", help="show OAuth clients holding tokens")
+    lc.set_defaults(fn=cmd_list_connections)
+
+    rc = sub.add_parser("revoke-connection", help="revoke a connector's OAuth tokens")
+    rc.add_argument("email")
+    rc.add_argument("client_id", nargs="?", default=None,
+                    help="limit to one client; omit to revoke all of them")
+    rc.set_defaults(fn=cmd_revoke_connection)
 
     args = ap.parse_args()
     args.fn(args)

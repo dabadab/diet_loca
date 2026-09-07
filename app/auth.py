@@ -44,8 +44,13 @@ def hash_password(password: str) -> str:
     return _ph.hash(password)
 
 
-def _digest(raw_token: str) -> bytes:
+def token_digest(raw_token: str) -> bytes:
+    """What actually gets stored. Every credential in this system is kept as a
+    digest, so a database dump is not a set of working tokens."""
     return hashlib.sha256(raw_token.encode()).digest()
+
+
+_digest = token_digest  # the name the existing call sites use
 
 
 class Throttle:

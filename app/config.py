@@ -37,6 +37,9 @@ class Settings:
     pool_max_size: int
     mcp_enabled: bool
     mcp_path: str
+    oauth_enabled: bool
+    oauth_access_ttl_minutes: int
+    oauth_refresh_ttl_days: int
 
     @property
     def run_migrations(self) -> bool:
@@ -76,4 +79,10 @@ def load() -> Settings:
         # and then sends nothing at all if the path is deeper than one segment.
         # Changing this is not advised.
         mcp_path=os.environ.get("MCP_PATH", "/mcp"),
+        # OAuth needs a public https base URL, because the metadata documents
+        # advertise absolute endpoints and Claude fetches them from outside.
+        # Without one there is nothing to advertise, so it stays off.
+        oauth_enabled=_flag("OAUTH_ENABLED", bool(os.environ.get("MCP_PUBLIC_URL", "").strip())),
+        oauth_access_ttl_minutes=int(os.environ.get("OAUTH_ACCESS_TTL_MINUTES", "60")),
+        oauth_refresh_ttl_days=int(os.environ.get("OAUTH_REFRESH_TTL_DAYS", "30")),
     )

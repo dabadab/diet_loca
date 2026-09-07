@@ -73,14 +73,35 @@ itself.
 ## MCP
 
 Five tools at `POST /mcp`: `log_meal`, `correct_meal`, `get_day`, `get_range`,
-`query_sql`. Authentication is a bearer token today; OAuth for Claude.ai custom
-connectors is the next piece.
+`query_sql`. Two ways to authenticate, on the same server:
+
+**Bearer token** — for Claude Code, MCP Inspector and scripts:
 
 ```sh
 docker compose exec app python -m app.manage issue-token you@example.com --label laptop
 claude mcp add --transport http diet https://your-host/mcp \
   --header "Authorization: Bearer <the token>"
 ```
+
+**OAuth** — for Claude.ai custom connectors, which cannot use a static header.
+Set `MCP_PUBLIC_URL` to the public https root (no trailing slash) and the
+authorization server turns itself on: `/authorize`, `/token`, `/register`
+(dynamic client registration), `/revoke`, and the two metadata documents. Then
+add `https://your-host/mcp` as a custom connector.
+
+It is *this* service's authorization server, over the accounts already in
+`auth.users` — there is no third party in the loop. Approving the connector
+uses the session cookie you already have, so it is one screen with two buttons,
+not a second login. Manage what is connected:
+
+```sh
+docker compose exec app python -m app.manage list-connections
+docker compose exec app python -m app.manage revoke-connection <email> [client_id]
+```
+
+`revoke-connection` works from this side and does not depend on the client
+calling `/revoke`, which matters because disconnecting something should not
+require its cooperation.
 
 `query_sql` connects as `diet_ro` — SELECT only, row-level security still
 applies, and it cannot see the `auth` schema at all. It additionally runs in a
@@ -104,6 +125,8 @@ docker compose exec app python -m app.manage seed-demo <email>   # sample rows f
 docker compose exec app python -m app.manage issue-token <email> [--label L] [--days N]
 docker compose exec app python -m app.manage list-tokens
 docker compose exec app python -m app.manage revoke-token <email> <label>
+docker compose exec app python -m app.manage list-connections
+docker compose exec app python -m app.manage revoke-connection <email> [client_id]
 docker compose exec db psql -U diet_owner diet
 ```
 
@@ -117,6 +140,8 @@ app/queries.py   read queries — none of them filters by user, RLS already did
 app/writes.py    the write paths; rows are stamped by diet.current_user_id()
 app/mcp_server.py  the five MCP tools
 app/mcp_auth.py  bearer-token verification against auth.api_tokens
+app/oauth_provider.py  the OAuth 2.1 authorization server, over Postgres
+app/oauth_routes.py    the consent screen — the one part FastMCP cannot supply
 app/main.py      routes, and the /mcp mount
 app/manage.py    admin CLI
 web/index.html   the frontend
@@ -128,7 +153,7 @@ stub_api.py      superseded; kept only as a no-database way to serve the page
 | Role | Used by | Can |
 | --- | --- | --- |
 | `diet_owner` | migrations, admin CLI | everything; the app never connects as it |
-| `diet_app` | the running app | DML on `diet.*` under RLS; `auth.*` only via four definer functions |
+| `diet_app` | the running app | DML on `diet.*` under RLS; identity only via definer functions; DML on `auth.oauth_*` because it *is* the authorization server |
 | `diet_ro` | the MCP `query_sql` tool | `SELECT` on `diet.*` under RLS; cannot see `auth.*` at all |
 
 Passwords for the latter two come from `.env` and are re-applied on every

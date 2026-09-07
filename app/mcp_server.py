@@ -23,6 +23,8 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_access_token
 from pydantic import BaseModel, Field
 
+from fastmcp.server.auth import MultiAuth
+
 from . import config, db, queries, writes
 from .mcp_auth import PostgresTokenVerifier
 
@@ -30,6 +32,24 @@ log = logging.getLogger("diet.mcp")
 settings = config.load()
 
 MAX_SQL_ROWS = 500
+
+# Bearer tokens and OAuth on the same server. Claude.ai does the OAuth dance;
+# Claude Code, MCP Inspector and scripts keep using a token from
+# `manage.py issue-token`. Both resolve to the same AccessToken shape, so the
+# tools below cannot tell -- and do not need to tell -- which was used.
+_bearer = PostgresTokenVerifier()
+if settings.oauth_enabled:
+    from .oauth_provider import DietOAuthProvider
+
+    oauth_provider = DietOAuthProvider(
+        base_url=settings.mcp_public_url,
+        access_ttl_minutes=settings.oauth_access_ttl_minutes,
+        refresh_ttl_days=settings.oauth_refresh_ttl_days,
+    )
+    _auth = MultiAuth(server=oauth_provider, verifiers=[_bearer])
+else:
+    oauth_provider = None
+    _auth = _bearer
 
 mcp = FastMCP(
     name="Diet log",
@@ -40,7 +60,7 @@ mcp = FastMCP(
         "When correcting a meal, use correct_meal rather than logging a second "
         "one -- corrections keep the original for comparison."
     ),
-    auth=PostgresTokenVerifier(),
+    auth=_auth,
 )
 
 

@@ -167,6 +167,48 @@ in `manage.py`, so the app role can look a token up but cannot issue one. It
 stays after OAuth arrives, composed under FastMCP's `MultiAuth`, so scripts and
 Claude Code keep working against the same server Claude.ai talks to.
 
+## OAuth (implemented)
+
+One authorization server, two clients, the same `auth.users` rows — which was
+the point of the original design and is now literally true. FastMCP's
+`OAuthProvider` supplies `/authorize`, `/token`, `/register`, `/revoke` and the
+RFC 8414 / RFC 9728 metadata documents; `app/oauth_provider.py` supplies
+storage, and `app/oauth_routes.py` supplies the consent screen, which is the
+one thing no library can provide: deciding *who* is granting access.
+
+That decision comes from the existing session cookie. Approving the connector
+is therefore one screen with two buttons for someone already signed in, and a
+sign-in on that same screen for someone who isn't. There is no second account
+and no second login.
+
+Things worth knowing:
+
+- **`authorize()` cannot approve anything by itself.** The reference
+  implementation does, because it is a test double. At the point it runs,
+  nothing has established which user is granting access — so it parks the
+  request and redirects to consent, and identity is resolved there the same way
+  it is everywhere else in this system.
+- **Tokens are opaque and stored as digests**, like sessions and api_tokens.
+  Access and refresh are issued as a pair that revoke together, since half a
+  pair is never useful. Refresh rotates on use.
+- **An authorization code is consumed by the UPDATE that validates it**, so a
+  replayed code loses a race rather than being checked twice.
+- **`client_name` comes from dynamic registration**, i.e. from whoever
+  registered, and is rendered on the consent screen. It is escaped; a client
+  registering as `<script>alert(1)</script>` displays as text.
+- **The app role holds ordinary DML on `auth.oauth_*`**, unlike every other
+  table in that schema. This process *is* the authorization server, so it can
+  already mint a token for any user through its own code path — gating its own
+  token store behind definer functions would buy nothing. Password hashes,
+  sessions and api_tokens remain function-only, and the token lookup reaches
+  user profile fields through `auth.user_profile()` rather than by reading
+  `auth.users`.
+- **`/revoke` requires a `client_secret` field even from public clients** — the
+  SDK's request model declares it without a default, so a client that omits it
+  gets a 400. Sending it empty works. Because revocation should not depend on
+  the client choosing to call it, `manage.py revoke-connection` kills tokens
+  from this side.
+
 ## Frontend
 
 Custom HTML/JS (not Grafana) for the human-facing side, since the user wants
@@ -190,14 +232,14 @@ primary UI.
   per-user last-success (the status panel already reads it), and
   `diet.garmin_credentials` holds ciphertext with the key outside the database.
   No poller code exists yet, and no encryption code either.
-- **OAuth for the Claude.ai connector.** The tools work today over a bearer
-  token, which Claude Code and MCP Inspector accept but claude.ai (mostly) does
-  not. Plan: FastMCP's `OAuthProvider`, ported from its `InMemoryOAuthProvider`
-  reference implementation onto Postgres tables, with the consent step reusing
-  the existing session cookie so it really is the same accounts either way.
-  Note that the current MCP spec revision deprecates Dynamic Client
-  Registration in favour of Client ID Metadata Documents, while Claude.ai's
-  out-of-the-box path and FastMCP's base provider are both still DCR.
+- **Claude.ai has not actually been connected yet.** The OAuth server below is
+  built and exercised end to end against raw HTTP, but only against a local
+  http origin. The remaining unknowns are the ones no local test can settle:
+  TLS, a public hostname, and Anthropic's own client. The current MCP spec
+  revision also deprecates Dynamic Client Registration in favour of Client ID
+  Metadata Documents, while Claude.ai's out-of-the-box path and FastMCP's base
+  provider are both still DCR — so this is built on a mechanism with a stated
+  end-of-life.
 - Anthropic now documents a `static_headers` connector auth type in beta. If
   the org has it, the bearer token above may be enough and the OAuth work can
   wait; there is at least one report of the beta ignoring the header and

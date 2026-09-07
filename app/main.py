@@ -56,6 +56,9 @@ async def lifespan(_: FastAPI):
         db.close_pool()
 
 
+if settings.mcp_enabled and settings.oauth_enabled:
+    from . import oauth_routes
+
 # The MCP server is mounted at exactly /mcp, one path segment deep. That is not
 # cosmetic: Claude.ai has a documented failure where the connector completes the
 # OAuth handshake and then sends no traffic at all when the path is deeper.
@@ -291,6 +294,13 @@ def status(user: auth.User = Depends(current_user)):
                 "ms": None})
 
     return {"checked_at": time.time(), "stages": stages}
+
+
+# The consent screen. Registered before the mount below so it wins, and it has
+# to live on the app that holds the session cookie -- that cookie is the whole
+# reason approving the connector is not a second login.
+if settings.mcp_enabled and settings.oauth_enabled:
+    app.include_router(oauth_routes.router)
 
 
 # Mounted at "/" but registered last: Starlette matches routes in order, so

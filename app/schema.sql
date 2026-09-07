@@ -160,6 +160,77 @@ CREATE POLICY api_tokens_own ON auth.api_tokens
   USING (user_id = diet.current_user_id())
   WITH CHECK (user_id = diet.current_user_id());
 
+-- ------------------------------------------------------------- oauth -----
+-- Storage for the authorization server. Claude.ai connectors can only do
+-- OAuth, so this service issues its own tokens against the same auth.users
+-- rows the browser signs in with -- one authorization server, two clients.
+--
+-- Unlike the tables above, the app role gets ordinary DML on these rather than
+-- definer functions. That is deliberate and not a weakening: this process *is*
+-- the authorization server, so it can already mint a token for any user by
+-- walking its own code path. Gating its own token store behind functions would
+-- buy nothing. Password hashes, sessions and api_tokens stay function-only,
+-- and diet_ro still cannot see the auth schema at all.
+
+CREATE TABLE IF NOT EXISTS auth.oauth_clients (
+  client_id    text PRIMARY KEY,
+  -- The full RFC 7591 registration, kept verbatim rather than mirrored into
+  -- columns: the model has ~18 fields and the SDK wants the whole object back.
+  -- It holds client_secret in the clear for confidential clients because the
+  -- SDK compares the presented secret against this value directly. Claude
+  -- registers as a public client using PKCE, so normally there is no secret.
+  client_info  jsonb NOT NULL,
+  client_name  text,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  last_seen_at timestamptz
+);
+
+CREATE TABLE IF NOT EXISTS auth.oauth_pending (
+  pending_id text PRIMARY KEY,        -- opaque handle carried through consent
+  client_id  text NOT NULL REFERENCES auth.oauth_clients(client_id) ON DELETE CASCADE,
+  params     jsonb NOT NULL,          -- the AuthorizationParams being approved
+  created_at timestamptz NOT NULL DEFAULT now(),
+  expires_at timestamptz NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS auth.oauth_codes (
+  code_hash   bytea PRIMARY KEY,      -- sha256; the code itself is never stored
+  client_id   text NOT NULL REFERENCES auth.oauth_clients(client_id) ON DELETE CASCADE,
+  user_id     uuid NOT NULL REFERENCES auth.users(user_id) ON DELETE CASCADE,
+  redirect_uri text NOT NULL,
+  redirect_uri_provided_explicitly boolean NOT NULL DEFAULT true,
+  scopes      text[] NOT NULL DEFAULT '{}',
+  code_challenge text NOT NULL,       -- PKCE S256; the spec allows nothing else
+  resource    text,                   -- RFC 8707, echoed onto the issued token
+  expires_at  timestamptz NOT NULL,
+  -- Kept after use rather than deleted, so a replayed code is distinguishable
+  -- from an unknown one and can be refused loudly.
+  consumed_at timestamptz
+);
+
+CREATE TABLE IF NOT EXISTS auth.oauth_tokens (
+  token_hash bytea PRIMARY KEY,
+  kind       text NOT NULL CHECK (kind IN ('access', 'refresh')),
+  client_id  text NOT NULL REFERENCES auth.oauth_clients(client_id) ON DELETE CASCADE,
+  user_id    uuid NOT NULL REFERENCES auth.users(user_id) ON DELETE CASCADE,
+  scopes     text[] NOT NULL DEFAULT '{}',
+  resource   text,
+  pair_hash  bytea,                   -- the counterpart, so revoking one kills both
+  issued_at  timestamptz NOT NULL DEFAULT now(),
+  expires_at timestamptz,
+  revoked_at timestamptz
+);
+
+CREATE INDEX IF NOT EXISTS oauth_tokens_user_idx ON auth.oauth_tokens (user_id);
+CREATE INDEX IF NOT EXISTS oauth_tokens_pair_idx ON auth.oauth_tokens (pair_hash);
+CREATE INDEX IF NOT EXISTS oauth_codes_expiry_idx ON auth.oauth_codes (expires_at);
+CREATE INDEX IF NOT EXISTS oauth_pending_expiry_idx ON auth.oauth_pending (expires_at);
+
+-- No row-level security on these four: they are read before any user identity
+-- exists (that is the point of a token lookup), so a policy keyed on
+-- app.user_id would refuse every row. The boundary here is the schema grant --
+-- diet_ro has no USAGE on auth at all.
+
 -- The app role never touches auth.* directly; it calls these. They are
 -- SECURITY DEFINER (owner-run, so RLS does not apply inside them) and each one
 -- answers exactly one question, which is why a compromised app role still
@@ -259,6 +330,16 @@ CREATE FUNCTION auth.token_lookup(p_token_hash bytea)
 -- Minting and revoking are admin operations: manage.py does them over the
 -- owner connection. The app role gets lookup and nothing else, so a compromised
 -- app process cannot issue itself a token.
+
+DROP FUNCTION IF EXISTS auth.user_profile(uuid);
+CREATE FUNCTION auth.user_profile(p_user_id uuid)
+  RETURNS TABLE (email text, display_name text, timezone text, is_active boolean)
+  LANGUAGE sql SECURITY DEFINER STABLE
+  SET search_path = pg_catalog, auth
+  AS $fn$
+    SELECT u.email, u.display_name, u.timezone, u.is_active
+    FROM auth.users u WHERE u.user_id = p_user_id
+  $fn$;
 
 DROP FUNCTION IF EXISTS auth.user_timezone(uuid);
 CREATE FUNCTION auth.user_timezone(p_user_id uuid)
@@ -449,10 +530,16 @@ GRANT SELECT ON ALL TABLES IN SCHEMA diet TO diet_ro;
 REVOKE ALL ON ALL TABLES IN SCHEMA auth FROM diet_app, diet_ro;
 REVOKE ALL ON SCHEMA auth FROM diet_ro;
 
+-- ...except the authorization server's own storage, per the note above.
+GRANT SELECT, INSERT, UPDATE, DELETE
+  ON auth.oauth_clients, auth.oauth_pending, auth.oauth_codes, auth.oauth_tokens
+  TO diet_app;
+
 REVOKE ALL ON FUNCTION auth.login_lookup(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION auth.session_create(uuid, bytea, interval, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION auth.session_lookup(bytea) FROM PUBLIC;
 REVOKE ALL ON FUNCTION auth.session_delete(bytea) FROM PUBLIC;
+REVOKE ALL ON FUNCTION auth.user_profile(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION auth.token_lookup(bytea) FROM PUBLIC;
 REVOKE ALL ON FUNCTION auth.user_timezone(uuid) FROM PUBLIC;
 
@@ -460,6 +547,7 @@ GRANT EXECUTE ON FUNCTION auth.login_lookup(text) TO diet_app;
 GRANT EXECUTE ON FUNCTION auth.session_create(uuid, bytea, interval, text) TO diet_app;
 GRANT EXECUTE ON FUNCTION auth.session_lookup(bytea) TO diet_app;
 GRANT EXECUTE ON FUNCTION auth.session_delete(bytea) TO diet_app;
+GRANT EXECUTE ON FUNCTION auth.user_profile(uuid) TO diet_app;
 GRANT EXECUTE ON FUNCTION auth.token_lookup(bytea) TO diet_app;
 GRANT EXECUTE ON FUNCTION auth.user_timezone(uuid) TO diet_app;
 GRANT EXECUTE ON FUNCTION diet.current_user_id() TO diet_app, diet_ro;

@@ -102,8 +102,10 @@ def auth_tx() -> Iterator[psycopg.Cursor]:
     For the identity bootstrap only -- the lookups that run *before* a user is
     known, and so cannot set app.user_id. Deliberately separate from user_tx so
     that "this query runs unscoped" is visible at the call site. The app role
-    has no table privileges in auth, only EXECUTE on the definer functions, so
-    this wrapper still cannot read arbitrary identity data.
+    has no table privileges on auth.users, auth.sessions or auth.api_tokens --
+    only EXECUTE on the definer functions -- so this wrapper cannot read
+    arbitrary identity data. It does have ordinary DML on the auth.oauth_*
+    tables, because this process is itself the authorization server.
     """
     with _require_pool().connection() as conn:
         with conn.transaction():
