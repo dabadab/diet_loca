@@ -60,6 +60,9 @@ services:
       # bind-mount source as a directory, and pointing that at the key path
       # produces "Is a directory" at exactly the moment you try to create it.
       - ./secrets:/run/secrets:ro
+      # Also here, so an ad-hoc `docker compose exec app python -m app.poller`
+      # archives payloads instead of silently discarding them.
+      - garminraw:/var/log/diet/garmin
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${APP_PORT:-8080}:8080"
 

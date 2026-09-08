@@ -18,6 +18,13 @@ COPY web/ ./web/
 
 # Non-root. Nothing in /srv needs to be writable at runtime.
 RUN useradd --system --uid 10001 --no-create-home diet
+
+# The Garmin raw-payload archive. Created here, owned by the runtime user, so
+# that a fresh named volume mounted over it inherits that ownership -- Docker
+# seeds an empty volume from the image, and a path that does not exist in the
+# image becomes a root-owned mountpoint the container cannot write to.
+RUN mkdir -p /var/log/diet/garmin && chown -R 10001:10001 /var/log/diet
+
 USER 10001
 
 EXPOSE 8080
