@@ -118,12 +118,43 @@
   .bar-fill.protein { background: var(--leaf); }
   .bar-fill.over { background: var(--tomato); }
 
+  .expenditure-row {
+    display: flex; align-items: center; gap: 10px;
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.82rem;
+    margin-bottom: 14px; padding: 10px 12px; background: var(--paper);
+    border: 1px dashed var(--ink-soft); border-radius: 4px; flex-wrap: wrap;
+  }
+  .expenditure-row .label { color: var(--ink-soft); flex: 1; }
+  .expenditure-row .figure { font-weight: 600; }
+
   .balance-line {
     font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.78rem; color: var(--ink-soft);
   }
   .balance-line .value { color: var(--ink); font-weight: 600; }
   .balance-line .deficit { color: var(--leaf-dark); font-weight: 600; }
   .balance-line .surplus { color: var(--tomato); font-weight: 600; }
+
+  .stat-row {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 18px;
+  }
+  .stat {
+    background: var(--paper); border: 1px dashed var(--ink-soft); border-radius: 4px;
+    padding: 10px 12px;
+  }
+  .stat-label {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.7rem;
+    color: var(--ink-soft); margin-bottom: 4px;
+  }
+  .stat-value {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 1.15rem;
+    font-weight: 600; line-height: 1.2;
+  }
+  .stat-unit { font-size: 0.7rem; font-weight: 400; color: var(--ink-soft); }
+  .stat-note {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.66rem;
+    color: var(--ink-soft); margin-top: 3px;
+  }
+  @media (max-width: 520px) { .stat-row { grid-template-columns: 1fr; } }
 
   .table-wrap { overflow-x: auto; }
   table.days { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
@@ -142,20 +173,15 @@
   table.days tbody tr.day-row { cursor: pointer; }
   table.days tbody tr.day-row:hover td { background: var(--paper); }
   table.days tr.today td { font-weight: 600; }
-  td.date { font-family: 'Karla', sans-serif; font-size: 0.9rem; }
-  td.date::before {
-    content: "▸"; color: var(--ink-soft); display: inline-block; width: 1.1em;
-    font-size: 0.8em; transition: transform 0.15s ease;
-  }
-  tr.open td.date::before { transform: rotate(90deg); }
+  table.days tr.day-row.active td { background: var(--paper); }
+  table.days tr.day-row.active td.date { font-weight: 700; }
+  table.days tr.day-row.active td:first-child { box-shadow: inset 3px 0 0 var(--leaf-dark); }
+  td.date { font-family: 'Karla', sans-serif; font-size: 0.9rem; padding-left: 10px; }
   .est { border-bottom: 1px dotted var(--ink-soft); }
   .partial { border-bottom: 1px dotted var(--butter); }
   .neg { color: var(--leaf-dark); font-weight: 600; }
   .pos { color: var(--tomato); font-weight: 600; }
   .muted { color: var(--ink-soft); }
-  tr.detail > td {
-    background: var(--paper); padding: 4px 0 12px 14px; border-bottom: 1px dotted var(--paper-line);
-  }
   .meal-line {
     display: flex; justify-content: space-between; gap: 12px; padding: 5px 0;
     font-family: 'Karla', sans-serif; font-size: 0.88rem; text-align: left;
@@ -168,6 +194,12 @@
     font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.72rem;
     color: var(--ink-soft); padding-left: 12px; border-left: 2px solid var(--paper-line);
     margin: 2px 0 6px; text-align: left;
+  }
+
+  .entries { margin-top: 18px; }
+  .entries h3 {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.78rem;
+    color: var(--ink-soft); margin: 0 0 8px; font-weight: 500;
   }
 
   .empty-note { color: var(--ink-soft); font-size: 0.88rem; font-style: italic; padding: 6px 0; }
@@ -245,7 +277,7 @@ const WINDOW_DAYS = 28;
 let state = {
   mode: "days",
   days: [],          // newest first, from /api/days
-  expanded: new Set(),   // dates whose meals are shown
+  activeDate: null,      // the day shown in full
   detail: {},        // date -> /api/day payload
   me: null,
   goals: { kcal: 1800, protein: 150 },
@@ -353,90 +385,74 @@ function renderModeTabs() {
 // The day list: every day in the window on one screen with its own totals,
 // which is the view that actually answers "how am I doing". A row expands to
 // the meals behind its numbers.
+// The day display: the selected day in full, with a vertical list of every day
+// and its own totals underneath to move between them.
 function renderDays() {
   const box = el("dayView");
   if (!state.days.length) {
     box.innerHTML = `<div class="summary"><div class="empty-note">
       No days recorded yet. Log a meal through Claude, or run the Garmin sync,
-      and the first row appears here.</div></div>`;
+      and the first day appears here.</div></div>`;
     return;
   }
-  const today = state.days[0].date;
-
-  // Any expanded row without its detail yet gets fetched here rather than only
-  // in the click handler, so an expanded row can never stick on "Loading…".
-  for (const date of state.expanded) {
-    if (!state.detail[date]) loadDetail(date);
+  if (!state.activeDate || !state.days.some((d) => d.date === state.activeDate)) {
+    state.activeDate = state.days[0].date;
   }
-
-  const rows = state.days.map((d) => {
-    const known = d.energy_in_kcal != null && d.energy_out_kcal != null;
-    const bal = known ? d.energy_in_kcal - d.energy_out_kcal : null;
-    const inCell = d.energy_in_kcal == null ? '<span class="muted">—</span>'
-      : `<span class="${d.intake_source === "claude-estimate" ? "est" : ""}"
-           title="${d.intake_source === "claude-estimate" ? "estimated from a description" : "measured"}"
-           >${n0(d.energy_in_kcal)}</span>`;
-    const outCell = d.energy_out_kcal == null ? '<span class="muted">—</span>'
-      : d.energy_out_partial
-        ? `<span class="partial" title="active calories only — whole-day total not synced">${n0(d.energy_out_kcal)}</span>`
-        : n0(d.energy_out_kcal);
-    const dt = new Date(d.date + "T12:00:00");
-    const label = dt.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
-    const open = state.expanded.has(d.date);
-    return `
-      <tr class="day-row${d.date === today ? " today" : ""}${open ? " open" : ""}" data-date="${d.date}">
-        <td class="date">${esc(label)}${d.date === today ? " · today" : ""}</td>
-        <td>${inCell}</td>
-        <td>${d.protein_g == null ? '<span class="muted">—</span>' : n1(d.protein_g)}</td>
-        <td>${outCell}</td>
-        <td class="${bal == null ? "muted" : bal < 0 ? "neg" : "pos"}">${
-          bal == null ? "—" : (bal > 0 ? "+" : "") + n0(bal)}</td>
-        <td>${d.weight_kg == null ? '<span class="muted">—</span>' : n1(d.weight_kg)}</td>
-        <td>${d.meals_logged || '<span class="muted">—</span>'}</td>
-      </tr>
-      ${open ? `<tr class="detail"><td colspan="7">${dayDetailHtml(d.date)}</td></tr>` : ""}`;
-  }).join("");
-
-  box.innerHTML = `
-    <div class="summary">
-      <div class="summary-top">
-        <h2>Recent days</h2>
-        <span class="block-title"><span class="sub">${state.days.length} days · newest first</span></span>
-      </div>
-      <div class="table-wrap">
-        <table class="days">
-          <thead><tr>
-            <th>Date</th><th>In</th><th>Protein</th><th>Out</th>
-            <th>Balance</th><th>Weight</th><th>Meals</th>
-          </tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
-      <div class="avg-line" style="margin-top:14px">
-        kcal in / g protein / kcal out / balance / kg. Underlined intake is estimated
-        from a description; everything else is measured. Click a day for its meals.
-      </div>
-    </div>`;
+  box.innerHTML = dayCard() + dayListCard();
 
   box.querySelectorAll("tr.day-row").forEach((tr) => {
     tr.addEventListener("click", () => {
-      const date = tr.dataset.date;
-      if (state.expanded.has(date)) state.expanded.delete(date);
-      else { state.expanded.add(date); if (!state.detail[date]) loadDetail(date); }
+      state.activeDate = tr.dataset.date;
       renderDays();
+      box.scrollIntoView({ behavior: "smooth", block: "start" });
     });
   });
 }
 
-function dayDetailHtml(date) {
-  const detail = state.detail[date];
-  if (!detail) return '<div class="empty-note">Loading…</div>';
-  if (!detail.meals.length) {
-    return `<div class="empty-note">Nothing logged on this day.${
-      detail.measurements && detail.measurements.length
-        ? ` ${detail.measurements.length} measurement${detail.measurements.length === 1 ? "" : "s"} from Garmin.`
-        : ""}</div>`;
-  }
+function dayCard() {
+  const d = state.days.find((x) => x.date === state.activeDate);
+  const dt = new Date(d.date + "T12:00:00");
+  const heading = dt.toLocaleDateString(undefined,
+    { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+  const pill = d.intake_source
+    ? `<span class="status-pill ${d.intake_source === "claude-estimate" ? "estimated" : "measured"}">${
+        d.intake_source === "claude-estimate" ? "intake estimated" : "intake measured"}</span>`
+    : `<span class="status-pill">nothing logged</span>`;
+
+  const detail = state.detail[d.date];
+  if (!detail) loadDetail(d.date);
+
+  return `
+    <div class="summary">
+      <div class="summary-top"><h2>${esc(heading)}</h2>${pill}</div>
+
+      <div class="expenditure-row">
+        <span class="label">measured expenditure (Garmin)</span>
+        <span class="figure">${n0(d.energy_out_kcal)} kcal</span>
+        ${d.weight_kg != null ? `<span class="label" style="flex:0 0 auto">· weight</span>
+          <span class="figure">${n1(d.weight_kg)} kg</span>` : ""}
+      </div>
+
+      ${balanceLine(d.energy_in_kcal, d.energy_out_kcal, { partial: d.energy_out_partial })}
+      <div style="height:16px"></div>
+
+      ${bar("calories", d.energy_in_kcal, state.goals.kcal, "kcal", "kcal")}
+      ${bar("protein", d.protein_g, state.goals.protein, "protein", "g")}
+      ${(d.carb_g != null || d.fat_g != null)
+        ? `<div class="avg-line">carbs ${n1(d.carb_g)} g · fat ${n1(d.fat_g)} g</div>` : ""}
+
+      <div class="entries">
+        <h3>Meals${d.meals_logged ? ` (${d.meals_logged})` : ""}</h3>
+        ${detail == null ? '<div class="empty-note">Loading…</div>' : mealsHtml(detail)}
+      </div>
+      <div class="avg-line" style="margin-top:14px">
+        Meals are logged by describing them to Claude, which writes them here.
+      </div>
+    </div>`;
+}
+
+function mealsHtml(detail) {
+  if (!detail.meals.length) return '<div class="empty-note">Nothing logged on this day.</div>';
   return detail.meals.map((m) => {
     const when = new Date(m.eaten_at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
     const protein = (m.items || []).reduce((a, i) => a + Number(i.protein_g || 0), 0);
@@ -450,6 +466,53 @@ function dayDetailHtml(date) {
       </div>
       <div class="meal-items">${items || "no breakdown recorded"}</div>`;
   }).join("");
+}
+
+function dayListCard() {
+  const today = state.days[0].date;
+  const rows = state.days.map((d) => {
+    const known = d.energy_in_kcal != null && d.energy_out_kcal != null;
+    const bal = known ? d.energy_in_kcal - d.energy_out_kcal : null;
+    const inCell = d.energy_in_kcal == null ? '<span class="muted">—</span>'
+      : `<span class="${d.intake_source === "claude-estimate" ? "est" : ""}">${n0(d.energy_in_kcal)}</span>`;
+    const outCell = d.energy_out_kcal == null ? '<span class="muted">—</span>'
+      : d.energy_out_partial
+        ? `<span class="partial" title="active calories only">${n0(d.energy_out_kcal)}</span>`
+        : n0(d.energy_out_kcal);
+    const dt = new Date(d.date + "T12:00:00");
+    const label = dt.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+    return `
+      <tr class="day-row${d.date === state.activeDate ? " active" : ""}${d.date === today ? " today" : ""}"
+          data-date="${d.date}">
+        <td class="date">${esc(label)}${d.date === today ? " · today" : ""}</td>
+        <td>${inCell}</td>
+        <td>${d.protein_g == null ? '<span class="muted">—</span>' : n1(d.protein_g)}</td>
+        <td>${outCell}</td>
+        <td class="${bal == null ? "muted" : bal < 0 ? "neg" : "pos"}">${
+          bal == null ? "—" : (bal > 0 ? "+" : "") + n0(bal)}</td>
+        <td>${d.weight_kg == null ? '<span class="muted">—</span>' : n1(d.weight_kg)}</td>
+        <td>${d.meals_logged || '<span class="muted">—</span>'}</td>
+      </tr>`;
+  }).join("");
+
+  return `
+    <div class="summary">
+      <div class="summary-top"><h2>All days</h2>
+        <span class="sub">${state.days.length} days · newest first</span></div>
+      <div class="table-wrap">
+        <table class="days">
+          <thead><tr>
+            <th>Date</th><th>In</th><th>Protein</th><th>Out</th>
+            <th>Balance</th><th>Weight</th><th>Meals</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div class="avg-line" style="margin-top:14px">
+        kcal in / g protein / kcal out / balance / kg. Underlined intake is estimated
+        from a description. Pick a day to see it above.
+      </div>
+    </div>`;
 }
 
 const inFlight = new Set();
@@ -466,6 +529,75 @@ async function loadDetail(date) {
   if (state.mode === "days") renderDays();
 }
 
+// --- summary ---------------------------------------------------------------
+
+// Days where Garmin synced but nothing was eaten are not zero-calorie days --
+// they are days with no intake. Averaging them in invents a deficit, so each
+// figure is averaged over only the days that actually carry it, and the counts
+// are shown.
+function statsFor(list) {
+  const add = (xs, k) => xs.reduce((a, d) => a + (d[k] || 0), 0);
+  const withIntake = list.filter((d) => d.energy_in_kcal != null);
+  const withOut = list.filter((d) => d.energy_out_kcal != null);
+  const both = list.filter((d) => d.energy_in_kcal != null && d.energy_out_kcal != null);
+  return {
+    n: list.length,
+    intakeDays: withIntake.length,
+    kcal: add(withIntake, "energy_in_kcal"),
+    protein: add(withIntake, "protein_g"),
+    outDays: withOut.length,
+    out: add(withOut, "energy_out_kcal"),
+    bothDays: both.length,
+    balance: add(both, "energy_in_kcal") - add(both, "energy_out_kcal"),
+  };
+}
+
+function stat(label, value, unit, days, cls) {
+  const days_ = `over ${days} day${days === 1 ? "" : "s"}`;
+  return `
+    <div class="stat">
+      <div class="stat-label">${label}</div>
+      <div class="stat-value ${cls || ""}">${value == null ? "—" : (unit === "g" ? n1(value) : n0(value))}
+        <span class="stat-unit">${value == null ? "" : unit}</span></div>
+      <div class="stat-note">${value == null ? "no data" : days_}</div>
+    </div>`;
+}
+
+function avgRow(st) {
+  const kcalAvg = st.intakeDays ? st.kcal / st.intakeDays : null;
+  const proteinAvg = st.intakeDays ? st.protein / st.intakeDays : null;
+  const balAvg = st.bothDays ? st.balance / st.bothDays : null;
+  // "avg deficit −448" reads as a double negative. Name the direction instead
+  // and show the size, so the number always means what the label says.
+  const balLabel = balAvg == null ? "avg balance" : balAvg <= 0 ? "avg deficit" : "avg surplus";
+  return `<div class="stat-row">
+    ${stat("avg intake", kcalAvg, "kcal", st.intakeDays)}
+    ${stat("avg protein", proteinAvg, "g", st.intakeDays)}
+    ${stat(balLabel, balAvg == null ? null : Math.abs(balAvg), "kcal", st.bothDays,
+           balAvg == null ? "" : balAvg <= 0 ? "neg" : "pos")}
+  </div>`;
+}
+
+function statsBlock(st) {
+  if (!st.intakeDays && !st.bothDays) {
+    return `<div class="empty-note">No meals logged${
+      st.outDays ? ` — expenditure synced for ${st.outDays} of ${st.n} days` : ""}.</div>`;
+  }
+  const d = st.intakeDays;
+  return `
+    ${avgRow(st)}
+    ${d ? `
+      ${bar("calories, total", st.kcal, state.goals.kcal * d, "kcal", "kcal")}
+      ${bar("protein, total", st.protein, state.goals.protein * d, "protein", "g")}
+      <div class="avg-line">totals and bars cover the ${d} of ${st.n} day${st.n === 1 ? "" : "s"} with meals logged</div>
+    ` : ""}
+    ${st.bothDays ? `<div class="balance-line" style="margin-top:12px">
+      total ${st.balance <= 0 ? "deficit" : "surplus"} over ${st.bothDays} day${st.bothDays === 1 ? "" : "s"}
+      with both figures:
+      <span class="${st.balance <= 0 ? "neg" : "pos"}">${n0(Math.abs(st.balance))} kcal</span>
+      </div>` : ""}`;
+}
+
 function renderRollup() {
   const box = el("rollupView");
   const recorded = state.days.filter((d) => d.meals_logged > 0 || d.energy_out_kcal != null);
@@ -477,7 +609,7 @@ function renderRollup() {
   const weeks = [];
   for (let i = 0; i < asc.length; i += 7) weeks.push(asc.slice(i, i + 7));
 
-  const blocks = weeks.map((week, wi) => {
+  const weekCards = weeks.map((week, wi) => {
     const st = statsFor(week);
     const weights = week.filter((d) => d.weight_kg != null);
     return `
@@ -496,20 +628,21 @@ function renderRollup() {
   const withIntake = recorded.filter((d) => d.energy_in_kcal != null);
   const overKcal = withIntake.filter((d) => d.energy_in_kcal > state.goals.kcal).length;
   const hitProtein = withIntake.filter((d) => (d.protein_g || 0) >= state.goals.protein).length;
+  const weights = recorded.filter((d) => d.weight_kg != null);
 
-  box.innerHTML = blocks + `
+  box.innerHTML = `
     <div class="block-card">
       <div class="block-title"><h2>All days</h2>
         <span class="sub">${all.n} recorded · ${all.intakeDays} with meals</span></div>
-      ${all.intakeDays ? `
-        ${bar("daily average calories", all.kcal / all.intakeDays, state.goals.kcal, "kcal", "kcal")}
-        ${bar("daily average protein", all.protein / all.intakeDays, state.goals.protein, "protein", "g")}
-        <div class="avg-line" style="margin-top:12px">
-          calorie target exceeded on ${overKcal} of ${all.intakeDays} logged days ·
-          protein target met on ${hitProtein} of ${all.intakeDays}
-        </div>`
-      : '<div class="empty-note">No meals logged yet.</div>'}
-    </div>`;
+      ${statsBlock(all)}
+      ${all.intakeDays ? `<div class="avg-line" style="margin-top:12px">
+        calorie target exceeded on ${overKcal} of ${all.intakeDays} logged days ·
+        protein target met on ${hitProtein} of ${all.intakeDays}</div>` : ""}
+      ${weights.length >= 2 ? `<div class="avg-line">
+        weight ${n1(weights[weights.length - 1].weight_kg)} kg → ${n1(weights[0].weight_kg)} kg
+        over ${weights.length} weigh-ins</div>` : ""}
+    </div>
+    ${weekCards}`;
 }
 
 async function renderSystem() {
