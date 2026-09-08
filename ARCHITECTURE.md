@@ -1,17 +1,22 @@
 # Diet tracker — architecture notes
 
-Context for whoever (human or Claude Code) picks this project up next. This is
-the output of a design conversation, not a spec handed down from elsewhere —
-treat the decisions below as defaults worth reconsidering if they don't hold up
-once real code exists, but they're not arbitrary either.
+Context for whoever (human or Claude Code) picks this project up next. It began
+as the output of a design conversation rather than a spec handed down from
+elsewhere, and it is now a record of what was actually built and what the
+building taught — the sections below say where the implementation departed from
+the original sketch, and why. Treat the decisions as defaults worth
+reconsidering, but not as arbitrary.
 
 ## Shape of the system
 
 ```
-Garmin Connect ──(poller, systemd timer)──┐
-                                          ├──> PostgreSQL <── MCP server ──(HTTPS+OAuth2.1)── Claude web chat
+Garmin Connect ──(poller sidecar, hourly)──┐
+                                           ├──> PostgreSQL <── MCP server ──(HTTPS+OAuth2.1)── Claude
 Browser (custom HTML/JS) ──(HTTPS+session cookie)── App server ──┘
 ```
+
+All of this is built and running. Three containers — `app`, `db`, `poller` —
+behind nginx with TLS.
 
 One Postgres database. Two writers (Garmin poller, Claude via MCP tools).
 Two readers (the browser frontend, ad-hoc SQL via a read-only MCP tool).
@@ -22,10 +27,14 @@ row-level security, not by application-layer filtering.
 
 ## What exists now
 
-The real backend is built and containerised — see [README.md](README.md) for
-the deploy. `docker compose up -d --build` brings up Postgres and the app; the
-app applies `app/schema.sql` itself at startup under an advisory lock, so there
-is no separate migration step.
+Deployed and in use — see [README.md](README.md). `docker compose up -d --build`
+brings up Postgres, the app and the Garmin poller; the app applies
+`app/schema.sql` itself at startup under an advisory lock, so there is no
+separate migration step.
+
+Live as of September 2026: real Garmin measurements flowing in hourly, meals
+logged and corrected through Claude — both the Claude.ai custom connector and
+Claude Code, over this service's own OAuth — and both readable in the browser.
 
 - `app/` — FastAPI service. `db.py` holds the pool and the two transaction
   wrappers, and is the only module that can produce a cursor. `auth.py` is the
@@ -40,6 +49,11 @@ is no separate migration step.
 - `app/writes.py` — the first write paths in the project. Rows are stamped with
   `diet.current_user_id()` in SQL rather than with a value passed from Python,
   so there is no argument anywhere by which a caller could name a user.
+- `app/oauth_provider.py` / `app/oauth_routes.py` — the authorization server and
+  its consent screen, so Claude connects over OAuth against the same
+  `auth.users` rows the browser signs in with.
+- `app/garmin.py` / `app/poller.py` / `app/secretbox.py` — the Garmin sidecar
+  and the encryption for its stored sessions.
 - `stub_api.py` — superseded, kept only as a no-database way to serve the page.
   Do not deploy it; its identity still comes from a client-supplied header.
 
@@ -169,10 +183,39 @@ anyone to read, so each cycle writes a status file the container healthcheck
 reads, and a failed or stale cycle makes the container unhealthy.
 `docker compose run --rm poller --once --days 30` still does a one-shot backfill.
 
-**Not verified against a real Garmin account.** The parse and write path is
-covered by fixtures against real Postgres, but the field names in
-`DAILY_SPECS`/`SLEEP_SPECS` are a best reading of an undocumented API. The
-first real run is the test.
+### What the first real run established
+
+The field mapping was right on first contact: six of seven metrics landed, and
+the arithmetic checks out — `bmrKilocalories` (2153) + `activeKilocalories`
+(512) = `totalKilocalories` (2665), so `total_kcal` is the right field and is
+not double-counting activity.
+
+- **`body_fat_pct` is absent, correctly.** `get_stats_and_body` merges the body
+  composition response's `totalAverage` into the stats dict; `weight` arrives
+  from there, so the call works — Garmin simply has no `bodyFat` without a
+  scale that measures impedance. The spec is left in place: if such a scale
+  ever appears the metric starts populating with no code change. This is the
+  defensive parsing behaving as intended — a missing field produced no reading
+  rather than a fabricated one.
+- **`bmrKilocalories` is in the payload and unused.** For a diet log it is
+  arguably the most useful field available: it splits energy out into the part
+  that is not negotiable and the part that is. Adding it is not a one-line
+  change; see Open / deferred.
+- The stats payload also carries `sleepingSeconds`, which disagrees with the
+  `dailySleepDTO.sleepTimeSeconds` we store (512 vs 462 minutes). They measure
+  different things — time in the sleep window versus measured sleep — and the
+  one we store is the better of the two.
+
+### The credentials key
+
+The container runs as uid 10001, so the key file must be readable by that uid
+rather than by the host user who created it. Two failures came out of getting
+this wrong, both now designed against: Docker materialises a missing bind-mount
+source as a *directory*, so the secrets **directory** is mounted rather than the
+key file itself; and `garmin-login` verifies the key is usable **before**
+prompting, because a Garmin login costs an MFA code and a slot against an IP
+rate limit that answers 429 for a while afterwards. Discovering an unreadable
+key after spending both is the wrong order, and was how it was first written.
 
 ## MCP tools (surface kept intentionally small)
 
@@ -214,6 +257,16 @@ is therefore one screen with two buttons for someone already signed in, and a
 sign-in on that same screen for someone who isn't. There is no second account
 and no second login.
 
+**The Claude.ai custom connector connects against this successfully**, which
+was the step flagged from the outset as most likely to eat an evening — there
+is a cluster of open reports of that handshake failing against otherwise
+correct self-hosted servers. It worked first time, and the things complied with
+up front are the ones those reports blame: the endpoint sits at exactly `/mcp`,
+one path segment deep; a bare `POST /mcp` is served rather than redirected to
+`/mcp/`; the consent screen redirects with 303 and not 307/308; `/token` accepts
+form-urlencoded; there is no CDN bot protection in front of the path; and the
+`resource` in the protected-resource metadata matches the typed URL exactly.
+
 Things worth knowing:
 
 - **`authorize()` cannot approve anything by itself.** The reference
@@ -252,32 +305,42 @@ primary UI.
 
 ## Open / deferred
 
-- Which OAuth 2.1 implementation to build on: FastMCP (has auth support
-  built in — probably least effort), a supergateway-style stdio→HTTP wrapper
-  with a hand-rolled auth server behind nginx, or leaning on Auth0/similar as
-  the authorization server. Not decided — flagged as the step most likely to
-  eat an evening, since there are several open reports of the Claude.ai
-  connector OAuth flow failing against otherwise-correct self-hosted servers.
-  Suggested to validate MCP tools first against Claude Code (accepts a static
-  header) before adding OAuth into the mix.
-- **The Garmin poller works but has never talked to Garmin.** The field names
-  are the remaining unknown; see Garmin ingest. Credential key rotation is also
-  unimplemented: `secretbox` stores a `key_id` per row so a second key could be
-  introduced, but nothing re-encrypts.
-- **Claude.ai has not actually been connected yet.** The OAuth server below is
-  built and exercised end to end against raw HTTP, but only against a local
-  http origin. The remaining unknowns are the ones no local test can settle:
-  TLS, a public hostname, and Anthropic's own client. The current MCP spec
-  revision also deprecates Dynamic Client Registration in favour of Client ID
-  Metadata Documents, while Claude.ai's out-of-the-box path and FastMCP's base
-  provider are both still DCR — so this is built on a mechanism with a stated
-  end-of-life.
-- Anthropic now documents a `static_headers` connector auth type in beta. If
-  the org has it, the bearer token above may be enough and the OAuth work can
-  wait; there is at least one report of the beta ignoring the header and
-  falling back to OAuth anyway.
+- **Adding a measurement metric needs a real migration.** `bmr_kcal` is the
+  first one wanted, and it exposes a gap: a new metric must pass
+  `measurements_metric_known`, and `CREATE TABLE IF NOT EXISTS` cannot alter a
+  CHECK on a table that already exists. `schema.sql` being *idempotent* does
+  not make it *evolvable*. This needs an explicit
+  `ALTER TABLE ... DROP CONSTRAINT / ADD CONSTRAINT` step, a range in
+  `measurements_value_sane`, and an entry in `queries.KNOWN_METRICS` — done
+  once, properly, since every later metric follows the same path.
+- **DCR has a stated end-of-life.** The current MCP spec revision deprecates
+  Dynamic Client Registration in favour of Client ID Metadata Documents, while
+  Claude.ai's working path and FastMCP's base `OAuthProvider` are both still
+  DCR. `fastmcp/server/auth/cimd.py` exists but is beta and is not wired into
+  `OAuthProvider.get_routes()`, so moving is not a flag flip.
+- **`auth.oauth_clients` grows without bound.** Claude registers a fresh client
+  on every new connection — Anthropic warns about this — and the prune only
+  removes registrations that were *never* used (`last_seen_at IS NULL`). A
+  client that connected once and was then abandoned keeps its row for ever.
+  Nothing is broken; it accumulates. Pruning on `last_seen_at` age instead
+  would fix it, at the cost of forcing a re-consent for a connector that goes
+  quiet for a while.
+- Anthropic documents a `static_headers` connector auth type in beta. If the
+  org has it, a bearer token from `manage.py issue-token` may be enough on its
+  own; there is at least one report of the beta ignoring the header and falling
+  back to OAuth anyway.
+- **Credential key rotation is unimplemented.** `secretbox` stores a `key_id`
+  per row so a second key could be introduced, but nothing re-encrypts. Losing
+  `secrets/credentials.key` means re-authenticating every stored Garmin
+  session, so it needs backing up somewhere off the box.
+- We do not emit the RFC 9207 `iss` parameter on authorization responses — a
+  SHOULD in the current spec. Consistently not advertised, so a gap rather than
+  a violation.
+- Nothing writes `manual` provenance yet. The domain allows it and the UI
+  distinguishes it from `claude-estimate`, but there is no path to enter a meal
+  by hand without going through Claude.
 - Login is single-factor with an in-process rate limiter. That limiter is
   per-container, so it stops counting correctly the moment there is more than
   one app replica.
-- Sessions are opaque tokens in Postgres, not the OAuth 2.1 server the
-  connector will need. The two will share `auth.users`, not this cookie path.
+- The in-process login throttle is also what guards `/authorize`, so the same
+  single-replica caveat applies to the OAuth entry point.
