@@ -20,6 +20,9 @@ cal AS (
 intake AS (
     SELECT m.local_date,
            sum(i.kcal)                              AS kcal,
+           sum(i.protein_g)                         AS protein_g,
+           sum(i.carb_g)                            AS carb_g,
+           sum(i.fat_g)                             AS fat_g,
            bool_or(m.source = 'claude-estimate')    AS any_estimated
     FROM diet.meals m
     JOIN diet.meal_items i ON i.meal_id = m.meal_id
@@ -45,6 +48,9 @@ meas AS (
 )
 SELECT cal.local_date                                        AS date,
        round(intake.kcal)::int                               AS energy_in_kcal,
+       round(intake.protein_g, 1)                            AS protein_g,
+       round(intake.carb_g, 1)                               AS carb_g,
+       round(intake.fat_g, 1)                                AS fat_g,
        round(coalesce(meas.total_kcal, meas.active_kcal))::int AS energy_out_kcal,
        -- true when only the active portion is known, so the UI can avoid
        -- presenting an incomplete figure as a real expenditure total.
@@ -68,8 +74,9 @@ def days(cur, timezone: str, n: int) -> list[dict]:
     rows = [dict(r) for r in cur.fetchall()]
     for r in rows:
         r["date"] = r["date"].isoformat()
-        if r["weight_kg"] is not None:
-            r["weight_kg"] = float(r["weight_kg"])
+        for k in ("weight_kg", "protein_g", "carb_g", "fat_g"):
+            if r[k] is not None:
+                r[k] = float(r[k])
     # A window of entirely empty days is not data; say so, so the UI can show
     # its "nothing recorded yet" state instead of a wall of dashes.
     if all(r["meals_logged"] == 0 and r["energy_out_kcal"] is None

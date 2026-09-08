@@ -4,96 +4,222 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Diet log</title>
+<link rel="stylesheet" href="/static/fonts.css">
 <style>
   :root {
-    --paper:   #edf0f1;
-    --card:    #f7f8f9;
-    --ink:     #16232b;
-    --ink-dim: #5d6d76;
-    --line:    #cfd6da;
-    --ok:      #2b6b5f;
-    --stale:   #9d6b1c;
-    --down:    #9a3a2c;
-    --focus:   #1f5f8b;
+    --paper: #F6F1E4;
+    --paper-line: #DCD4BC;
+    --ink: #2B2A24;
+    --ink-soft: #6B6553;
+    --tomato: #B5452B;
+    --leaf: #4A6B3D;
+    --leaf-dark: #33492A;
+    --butter: #E3B23C;
+    --card: #FFFDF6;
   }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --paper: #151b1f; --card: #1c2429; --ink: #e2e8ea; --ink-dim: #94a3aa;
-      --line: #2f3a41; --ok: #6fb6a4; --stale: #d3a457; --down: #d98274; --focus: #7fb6da;
-    }
-  }
+
   * { box-sizing: border-box; }
+
   body {
-    margin: 0; padding: 2rem 1.25rem 4rem;
-    background: var(--paper); color: var(--ink);
-    font-family: "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    font-size: 15px; line-height: 1.5;
-    font-variant-numeric: tabular-nums;
+    margin: 0;
+    background: var(--paper);
+    background-image: repeating-linear-gradient(var(--paper-line) 0 1px, transparent 1px 32px);
+    color: var(--ink);
+    font-family: 'Karla', 'Segoe UI', system-ui, sans-serif;
+    padding: 28px 16px 60px;
   }
-  .wrap { max-width: 62rem; margin: 0 auto; }
 
-  header { display: flex; flex-wrap: wrap; gap: 1rem 2rem; align-items: baseline;
-           justify-content: space-between; padding-bottom: 1rem;
-           border-bottom: 1px solid var(--line); }
-  h1 { font-size: 1.35rem; font-weight: 600; letter-spacing: -0.01em; margin: 0; }
-  .who { color: var(--ink-dim); font-size: 0.9rem; display: flex; gap: 0.5rem; align-items: center; }
-  select { font: inherit; font-size: 0.9rem; color: var(--ink); background: var(--card);
-           border: 1px solid var(--line); border-radius: 3px; padding: 0.15rem 0.35rem; }
-  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .wrap { max-width: 720px; margin: 0 auto; }
 
-  .cols { display: grid; grid-template-columns: 19rem 1fr; gap: 2.5rem; margin-top: 2rem; }
-  @media (max-width: 44rem) { .cols { grid-template-columns: 1fr; gap: 2rem; } }
+  header {
+    display: flex; justify-content: space-between; align-items: flex-end;
+    border-bottom: 3px solid var(--ink); padding-bottom: 14px; margin-bottom: 20px;
+    gap: 16px; flex-wrap: wrap;
+  }
 
-  h2 { font-size: 0.95rem; font-weight: 600; margin: 0 0 0.75rem; }
-  .hint { color: var(--ink-dim); font-size: 0.85rem; margin: 0.75rem 0 0; }
+  h1 {
+    font-family: 'Fraunces', Georgia, serif; font-weight: 700; font-size: 2rem;
+    margin: 0; letter-spacing: -0.01em;
+  }
 
-  /* the chain: one row per stage, in data-flow order */
+  .goal-line {
+    text-align: right; font-family: 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 0.8rem; color: var(--ink-soft); line-height: 1.7;
+  }
+  .goal-line b { color: var(--ink); font-weight: 600; }
+  .goal-line input {
+    font: inherit; font-weight: 600; color: var(--ink); width: 5ch;
+    background: transparent; border: none; border-bottom: 1px dashed var(--ink-soft);
+    text-align: right; padding: 0 2px; appearance: textfield; -moz-appearance: textfield;
+  }
+  .goal-line input::-webkit-outer-spin-button,
+  .goal-line input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .goal-line input:focus { outline: none; border-bottom-style: solid; }
+  .who button {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.76rem;
+    background: none; border: none; color: var(--tomato); cursor: pointer;
+    padding: 0; text-decoration: underline;
+  }
+
+  .mode-tabs {
+    display: flex; margin-bottom: 16px; border: 1.5px solid var(--ink);
+    border-radius: 4px; overflow: hidden; width: fit-content;
+  }
+  .mode-tab {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.78rem;
+    padding: 8px 16px; border: none; background: var(--card); color: var(--ink);
+    cursor: pointer; border-right: 1.5px solid var(--ink);
+  }
+  .mode-tab:last-child { border-right: none; }
+  .mode-tab.active { background: var(--leaf-dark); color: var(--card); }
+
+  .day-tabs {
+    display: flex; gap: 6px; overflow-x: auto; margin-bottom: 18px; padding-bottom: 4px;
+  }
+  .day-tab {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.78rem;
+    padding: 7px 12px; border: 1.5px solid var(--ink); background: transparent;
+    color: var(--ink); cursor: pointer; white-space: nowrap; border-radius: 3px;
+  }
+  .day-tab.active { background: var(--ink); color: var(--paper); }
+  .day-tab.blank { border-style: dashed; border-color: var(--ink-soft); color: var(--ink-soft); }
+  .day-tab.today::after { content: " ●"; color: var(--tomato); }
+  .day-tab.active.today::after { color: var(--butter); }
+
+  .summary, .block-card {
+    background: var(--card); border: 1.5px solid var(--ink);
+    box-shadow: 4px 4px 0 var(--ink); padding: 20px 22px; margin-bottom: 18px;
+  }
+
+  .summary-top, .block-title {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-bottom: 16px; gap: 12px;
+  }
+  .summary-top h2, .block-title h2 {
+    font-family: 'Fraunces', Georgia, serif; font-size: 1.3rem; margin: 0; font-weight: 600;
+  }
+  .block-title h2 { font-size: 1.15rem; }
+  .block-title .sub, .avg-line {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.74rem; color: var(--ink-soft);
+  }
+  .avg-line { margin-top: 4px; }
+
+  .status-pill {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.72rem;
+    padding: 3px 9px; border-radius: 10px; border: 1px solid var(--ink); white-space: nowrap;
+  }
+  .status-pill.estimated { color: var(--tomato); border-color: var(--tomato); }
+  .status-pill.measured  { color: var(--leaf-dark); border-color: var(--leaf-dark); }
+  .status-pill.ok    { color: var(--leaf-dark); border-color: var(--leaf-dark); }
+  .status-pill.stale { color: var(--butter); border-color: var(--butter); }
+  .status-pill.down  { color: var(--tomato); border-color: var(--tomato); }
+
+  .metric { margin-bottom: 14px; }
+  .metric-label {
+    display: flex; justify-content: space-between;
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.82rem; margin-bottom: 6px;
+  }
+  .metric-label .name { color: var(--ink-soft); }
+  .metric-label .value { font-weight: 600; }
+
+  .bar-track {
+    height: 12px; background: var(--paper); border: 1px solid var(--ink);
+    border-radius: 7px; overflow: hidden;
+  }
+  .bar-fill { height: 100%; border-radius: 7px 0 0 7px; transition: width 0.4s ease; }
+  .bar-fill.kcal { background: var(--butter); }
+  .bar-fill.protein { background: var(--leaf); }
+  .bar-fill.over { background: var(--tomato); }
+
+  .expenditure-row {
+    display: flex; align-items: center; gap: 10px;
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.82rem;
+    margin-bottom: 16px; padding: 10px 12px; background: var(--paper);
+    border: 1px dashed var(--ink-soft); border-radius: 4px; flex-wrap: wrap;
+  }
+  .expenditure-row .label { color: var(--ink-soft); flex: 1; }
+  .expenditure-row .figure { font-weight: 600; }
+
+  .balance-line {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.78rem; color: var(--ink-soft);
+  }
+  .balance-line .value { color: var(--ink); font-weight: 600; }
+  .balance-line .deficit { color: var(--leaf-dark); font-weight: 600; }
+  .balance-line .surplus { color: var(--tomato); font-weight: 600; }
+
+  .entries { margin-top: 18px; }
+  .entries h3 {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.78rem;
+    color: var(--ink-soft); margin: 0 0 8px; font-weight: 500;
+  }
+  .entry-row {
+    display: flex; justify-content: space-between; align-items: baseline;
+    padding: 9px 0; border-bottom: 1px dotted var(--paper-line); font-size: 0.92rem; gap: 10px;
+  }
+  .entry-row:last-child { border-bottom: none; }
+  .entry-name { flex: 1; }
+  .entry-nums {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.8rem;
+    color: var(--ink-soft); white-space: nowrap;
+  }
+  .entry-items {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.74rem;
+    color: var(--ink-soft); padding: 4px 0 2px 14px; border-left: 2px solid var(--paper-line);
+    margin: 2px 0 6px;
+  }
+  details > summary { cursor: pointer; list-style: none; }
+  details > summary::-webkit-details-marker { display: none; }
+  .entry-name::before {
+    content: "▸"; color: var(--ink-soft); font-size: 0.8em; display: inline-block;
+    width: 1em; transition: transform 0.15s ease;
+  }
+  details[open] .entry-name::before { transform: rotate(90deg); }
+  details[open] .entry-row { border-bottom: none; }
+  details > summary:hover .entry-name { color: var(--leaf-dark); }
+
+  .empty-note { color: var(--ink-soft); font-size: 0.88rem; font-style: italic; padding: 6px 0; }
+
+  /* system / chain */
   .chain { list-style: none; margin: 0; padding: 0; }
-  .chain li { display: grid; grid-template-columns: 0.9rem 1fr auto; gap: 0.7rem;
-              align-items: start; padding: 0.55rem 0; position: relative; }
-  .chain li + li::before { content: ""; position: absolute; left: 0.38rem; top: -0.35rem;
-              height: 0.7rem; width: 1px; background: var(--line); }
-  .mark { width: 0.7rem; height: 0.7rem; margin-top: 0.32rem; border-radius: 2px;
-          border: 1.5px solid currentColor; }
-  .ok    { color: var(--ok); }    .ok .mark    { background: currentColor; }
-  .stale { color: var(--stale); } .stale .mark { background: linear-gradient(135deg, currentColor 50%, transparent 50%); }
-  .down  { color: var(--down); }  .down .mark  { background: none; }
-  .stage-name { color: var(--ink); font-weight: 500; }
-  .stage-detail { color: var(--ink-dim); font-size: 0.85rem; }
-  .lat { color: var(--ink-dim); font-size: 0.82rem; padding-top: 0.1rem; }
+  .chain li {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+    padding: 10px 0; border-bottom: 1px dotted var(--paper-line);
+  }
+  .chain li:last-child { border-bottom: none; }
+  .chain .stage-name { font-weight: 500; }
+  .chain .stage-detail {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.76rem;
+    color: var(--ink-soft); display: block; margin-top: 2px;
+  }
+  .chain .lat { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.74rem; color: var(--ink-soft); }
 
-  table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
-  th { text-align: right; font-weight: 500; color: var(--ink-dim); font-size: 0.82rem;
-       padding: 0 0 0.4rem; border-bottom: 1px solid var(--line); }
-  th:first-child, td:first-child { text-align: left; }
-  td { padding: 0.45rem 0; border-bottom: 1px solid var(--line); text-align: right; }
-  tbody tr:last-child td { border-bottom: none; }
-  .est { border-bottom: 1px dotted var(--ink-dim); }
-  .neg { color: var(--ok); }
-  .pos { color: var(--down); }
-  .muted { color: var(--ink-dim); }
-
-  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 4px;
-           padding: 1rem 1.1rem; }
-  .panel h2 { margin-bottom: 0.35rem; }
-  .panel p { margin: 0.35rem 0 0; color: var(--ink-dim); font-size: 0.9rem; }
-  code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 0.85em; }
-
-  /* sign-in */
+  /* sign in */
   form.login { display: grid; gap: 0.7rem; max-width: 21rem; }
-  label { display: grid; gap: 0.2rem; font-size: 0.85rem; color: var(--ink-dim); }
-  input { font: inherit; color: var(--ink); background: var(--paper);
-          border: 1px solid var(--line); border-radius: 3px; padding: 0.35rem 0.45rem; }
-  button { font: inherit; font-size: 0.9rem; color: var(--ink); background: var(--card);
-           border: 1px solid var(--line); border-radius: 3px; padding: 0.3rem 0.75rem;
-           cursor: pointer; }
-  button:hover:not(:disabled) { border-color: var(--ink-dim); }
-  button:disabled { opacity: 0.6; cursor: default; }
-  button.linkish { border: none; background: none; color: var(--focus);
-                   padding: 0; text-decoration: underline; }
-  .err { color: var(--down); font-size: 0.85rem; min-height: 1.2em; }
-  .est { border-bottom: 1px dotted var(--ink-dim); }
-  .partial { border-bottom: 1px dotted var(--stale); }
+  label.field { display: grid; gap: 0.2rem; font-family: 'IBM Plex Mono', ui-monospace, monospace;
+                font-size: 0.76rem; color: var(--ink-soft); }
+  label.field input {
+    font-family: 'Karla', sans-serif; font-size: 0.9rem; padding: 9px 10px;
+    border: 1.5px solid var(--ink); border-radius: 3px; background: var(--paper); color: var(--ink);
+  }
+  button.primary {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-weight: 600; font-size: 0.85rem;
+    background: var(--leaf-dark); color: var(--card); border: none; border-radius: 3px;
+    cursor: pointer; padding: 10px 16px;
+  }
+  button.primary:hover:not(:disabled) { background: var(--leaf); }
+  button.primary:disabled { opacity: 0.6; cursor: default; }
+  .err { color: var(--tomato); font-size: 0.82rem; min-height: 1.2em;
+         font-family: 'IBM Plex Mono', ui-monospace, monospace; }
+
+  .foot-note {
+    text-align: center; font-size: 0.74rem; color: var(--ink-soft); margin-top: 26px;
+    font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  }
+
+  @media (max-width: 480px) {
+    header { align-items: flex-start; }
+    .goal-line { text-align: left; }
+  }
 </style>
 </head>
 <body>
@@ -101,209 +227,432 @@
 
   <header>
     <h1>Diet log</h1>
-    <div class="who" id="who">Checking who you are…</div>
+    <div class="goal-line" id="goalLine"></div>
   </header>
 
-  <!-- Shown only while signed out. -->
   <div id="gate" hidden></div>
 
-  <div class="cols" id="cols" hidden>
-    <section aria-labelledby="chain-h">
-      <h2 id="chain-h">Where the data comes from</h2>
-      <ul class="chain" id="chain">
-        <li class="muted"><span class="mark"></span><span class="stage-name">Checking…</span></li>
-      </ul>
-      <p class="hint" id="chain-note"></p>
-    </section>
-
-    <section aria-labelledby="days-h">
-      <h2 id="days-h">Recent days</h2>
-      <div id="days">Loading…</div>
-    </section>
+  <div id="main" hidden>
+    <div class="mode-tabs" id="modeTabs"></div>
+    <div id="dayView">
+      <div class="day-tabs" id="dayTabs"></div>
+      <div id="summaryBox"></div>
+    </div>
+    <div id="rollupView" hidden></div>
+    <div id="systemView" hidden></div>
   </div>
 
+  <div class="foot-note" id="foot"></div>
 </div>
 
 <script>
 "use strict";
 
-// Identity is the session cookie, set by POST /api/login and sent automatically.
-// There is no way to ask the server for somebody else's data: no endpoint takes
-// a user id at all. (The stub's ?as= switch is gone with the stub.)
+// Identity is the session cookie. No endpoint takes a user id.
+const GOALS_KEY = "diet-log-goals";
+const WINDOW_DAYS = 28;
+
+let state = {
+  mode: "days",
+  days: [],          // newest first, from /api/days
+  activeDate: null,
+  detail: {},        // date -> /api/day payload
+  me: null,
+  goals: { kcal: 1800, protein: 150 },
+};
+
+// --- plumbing --------------------------------------------------------------
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
     ...options,
-    headers: { "Accept": "application/json", ...(options.headers || {}) },
+    headers: { Accept: "application/json", ...(options.headers || {}) },
   });
   let body = null;
-  try { body = await res.json(); } catch (_) { /* non-JSON error page */ }
+  try { body = await res.json(); } catch (_) {}
   if (!res.ok) {
     throw Object.assign(new Error(body?.error || `${path} returned ${res.status}`),
-                        { code: res.status, payload: body });
+                        { code: res.status });
   }
   return body;
 }
 
 const el = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const n0 = (v) => v == null ? "—" : Math.round(v).toLocaleString();
+const n1 = (v) => v == null ? "—" : Number(v).toFixed(1);
 
-function panel(target, title, detail) {
-  target.innerHTML = "";
-  const p = document.createElement("div");
-  p.className = "panel";
-  p.innerHTML = "<h2></h2><p></p>";
-  p.querySelector("h2").textContent = title;
-  p.querySelector("p").textContent = detail;
-  target.append(p);
-  return p;
+function loadGoals() {
+  try {
+    const raw = localStorage.getItem(GOALS_KEY);
+    if (raw) state.goals = { ...state.goals, ...JSON.parse(raw) };
+  } catch (_) { /* private mode, or nothing stored */ }
+}
+function saveGoals() {
+  try { localStorage.setItem(GOALS_KEY, JSON.stringify(state.goals)); } catch (_) {}
+}
+
+// --- pieces ----------------------------------------------------------------
+
+function bar(label, value, goal, cls, unit) {
+  const known = value != null;
+  const pct = known && goal > 0 ? Math.min(100, (value / goal) * 100) : 0;
+  const over = known && value > goal;
+  const shown = unit === "kcal" ? n0(value) : n1(value);
+  return `
+    <div class="metric">
+      <div class="metric-label">
+        <span class="name">${esc(label)}</span>
+        <span class="value">${shown} / ${unit === "kcal" ? n0(goal) : n1(goal)} ${unit}</span>
+      </div>
+      <div class="bar-track"><div class="bar-fill ${over ? "over" : cls}" style="width:${pct}%"></div></div>
+    </div>`;
+}
+
+function balanceLine(intake, expenditure, opts = {}) {
+  if (intake == null || expenditure == null) {
+    return `<div class="balance-line">energy balance: <span class="value">—</span>
+      ${expenditure == null ? "(no expenditure synced for this day)" : "(nothing logged)"}</div>`;
+  }
+  const diff = intake - expenditure;
+  const cls = diff < 0 ? "deficit" : "surplus";
+  const word = diff < 0 ? "deficit" : "surplus";
+  return `<div class="balance-line">energy balance: intake ${n0(intake)} kcal −
+    expenditure ${n0(expenditure)} kcal =
+    <span class="${cls}">${diff > 0 ? "+" : ""}${n0(diff)} kcal</span> (${word})
+    ${opts.partial ? '<br><span style="opacity:.75">expenditure is active calories only; the whole-day total has not synced</span>' : ""}
+    ${opts.note || ""}</div>`;
+}
+
+function renderGoalLine() {
+  const box = el("goalLine");
+  if (!state.me) { box.textContent = ""; return; }
+  box.innerHTML = `
+    <div class="who">signed in as <b>${esc(state.me.display_name)}</b> ·
+      <button id="signOut">sign out</button></div>
+    <div>target <input id="goalKcal" type="number" min="0" step="10" value="${state.goals.kcal}"> kcal ·
+      <input id="goalProtein" type="number" min="0" step="5" value="${state.goals.protein}"> g protein</div>`;
+  el("signOut").onclick = async () => {
+    await api("/api/logout", { method: "POST" }).catch(() => {});
+    location.reload();
+  };
+  for (const [id, key] of [["goalKcal", "kcal"], ["goalProtein", "protein"]]) {
+    el(id).addEventListener("change", (ev) => {
+      const v = parseFloat(ev.target.value);
+      if (!isNaN(v) && v >= 0) { state.goals[key] = v; saveGoals(); render(); }
+    });
+  }
+}
+
+function renderModeTabs() {
+  const modes = [["days", "Days"], ["rollup", "Summary"], ["system", "System"]];
+  el("modeTabs").innerHTML = "";
+  for (const [id, label] of modes) {
+    const b = document.createElement("button");
+    b.className = "mode-tab" + (state.mode === id ? " active" : "");
+    b.textContent = label;
+    b.onclick = () => { state.mode = id; render(); };
+    el("modeTabs").append(b);
+  }
+  el("dayView").hidden = state.mode !== "days";
+  el("rollupView").hidden = state.mode !== "rollup";
+  el("systemView").hidden = state.mode !== "system";
+}
+
+function renderDayTabs() {
+  const box = el("dayTabs");
+  box.innerHTML = "";
+  const today = state.days.length ? state.days[0].date : null;
+  // Oldest on the left, so the newest day sits where the eye ends up.
+  [...state.days].reverse().forEach((d) => {
+    const b = document.createElement("button");
+    const empty = !d.meals_logged && d.energy_out_kcal == null && d.weight_kg == null;
+    b.className = "day-tab"
+      + (d.date === state.activeDate ? " active" : "")
+      + (empty ? " blank" : "")
+      + (d.date === today ? " today" : "");
+    const dt = new Date(d.date + "T12:00:00");
+    b.textContent = dt.toLocaleDateString(undefined, { weekday: "short", day: "numeric" });
+    b.title = d.date;
+    b.onclick = () => { state.activeDate = d.date; render(); };
+    box.append(b);
+  });
+  const active = box.querySelector(".day-tab.active");
+  if (active) active.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+
+function renderDay() {
+  const box = el("summaryBox");
+  const day = state.days.find((d) => d.date === state.activeDate);
+  if (!day) { box.innerHTML = `<div class="summary"><div class="empty-note">No day selected.</div></div>`; return; }
+
+  const dt = new Date(day.date + "T12:00:00");
+  const heading = dt.toLocaleDateString(undefined,
+    { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+  const pill = day.intake_source
+    ? `<span class="status-pill ${day.intake_source === "claude-estimate" ? "estimated" : "measured"}">${
+        day.intake_source === "claude-estimate" ? "intake estimated" : "intake measured"}</span>`
+    : `<span class="status-pill">nothing logged</span>`;
+
+  const detail = state.detail[day.date];
+  const entries = detail ? detail.meals : null;
+
+  box.innerHTML = `
+    <div class="summary">
+      <div class="summary-top"><h2>${esc(heading)}</h2>${pill}</div>
+
+      <div class="expenditure-row">
+        <span class="label">measured expenditure (Garmin)</span>
+        <span class="figure">${n0(day.energy_out_kcal)} kcal</span>
+        ${day.weight_kg != null ? `<span class="label" style="flex:0 0 auto">· weight</span>
+          <span class="figure">${n1(day.weight_kg)} kg</span>` : ""}
+      </div>
+
+      ${balanceLine(day.energy_in_kcal, day.energy_out_kcal, { partial: day.energy_out_partial })}
+      <div style="height:16px"></div>
+
+      ${bar("calories", day.energy_in_kcal, state.goals.kcal, "kcal", "kcal")}
+      ${bar("protein", day.protein_g, state.goals.protein, "protein", "g")}
+
+      ${(day.carb_g != null || day.fat_g != null) ? `<div class="avg-line">
+        carbs ${n1(day.carb_g)} g · fat ${n1(day.fat_g)} g</div>` : ""}
+
+      <div class="entries">
+        <h3>Meals${day.meals_logged ? ` (${day.meals_logged})` : ""}</h3>
+        ${entries == null ? '<div class="empty-note">Loading…</div>'
+          : entries.length === 0
+            ? '<div class="empty-note">Nothing logged on this day.</div>'
+            : entries.map(mealRow).join("")}
+      </div>
+
+      <div class="avg-line" style="margin-top:14px">
+        Meals are logged by describing them to Claude, which writes them here.
+      </div>
+    </div>`;
+
+  if (entries == null) loadDetail(day.date);
+}
+
+function mealRow(m) {
+  const items = (m.items || []).map((i) =>
+    `${esc(i.food)} — ${n0(i.kcal)} kcal${i.grams != null ? `, ${n0(i.grams)} g` : ""}${
+      i.protein_g != null ? `, ${n1(i.protein_g)} g protein` : ""}`).join("<br>");
+  const when = new Date(m.eaten_at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  const protein = (m.items || []).reduce((a, i) => a + Number(i.protein_g || 0), 0);
+  return `
+    <details>
+      <summary>
+        <div class="entry-row">
+          <span class="entry-name">${esc(m.description)}</span>
+          <span class="entry-nums">${when} · ${n0(m.kcal)} kcal · ${n1(protein)} g</span>
+        </div>
+      </summary>
+      <div class="entry-items">${items || "no breakdown recorded"}</div>
+    </details>`;
+}
+
+async function loadDetail(date) {
+  try {
+    state.detail[date] = await api(`/api/day/${date}`);
+  } catch (err) {
+    state.detail[date] = { meals: [], error: err.message };
+  }
+  if (state.activeDate === date && state.mode === "days") renderDay();
+}
+
+// Days where Garmin synced but nothing was eaten are not zero-calorie days --
+// they are days with no intake data. Averaging them in produces a nonsense
+// deficit, so intake, expenditure and balance are each computed over only the
+// days that actually carry that figure, and the counts are shown.
+function statsFor(list) {
+  const withIntake = list.filter((d) => d.energy_in_kcal != null);
+  const withOut = list.filter((d) => d.energy_out_kcal != null);
+  const both = list.filter((d) => d.energy_in_kcal != null && d.energy_out_kcal != null);
+  const add = (xs, k) => xs.reduce((a, d) => a + (d[k] || 0), 0);
+  return {
+    n: list.length,
+    intakeDays: withIntake.length, kcal: add(withIntake, "energy_in_kcal"),
+    protein: add(withIntake, "protein_g"),
+    outDays: withOut.length, out: add(withOut, "energy_out_kcal"),
+    bothDays: both.length, bothIn: add(both, "energy_in_kcal"),
+    bothOut: add(both, "energy_out_kcal"),
+  };
+}
+
+function statsBlock(st) {
+  if (!st.intakeDays) {
+    return `<div class="empty-note">No meals logged${
+      st.outDays ? ` — expenditure synced for ${st.outDays} of ${st.n} days` : ""}.</div>`;
+  }
+  const d = st.intakeDays;
+  const scope = d === st.n ? "" :
+    `<div class="avg-line" style="opacity:.75">based on the ${d} of ${st.n} day${
+      st.n === 1 ? "" : "s"} with meals logged</div>`;
+  const balance = st.bothDays
+    ? balanceLine(st.bothIn, st.bothOut, { note: st.bothDays < st.n
+        ? `<br><span style="opacity:.75">(over the ${st.bothDays} day${st.bothDays === 1 ? "" : "s"} with both figures)</span>` : "" })
+    : `<div class="balance-line">energy balance: <span class="value">—</span> (no day has both intake and expenditure)</div>`;
+  return `
+    ${bar("calories logged", st.kcal, state.goals.kcal * d, "kcal", "kcal")}
+    <div class="avg-line">daily average: ${n0(st.kcal / d)} kcal (target ${n0(state.goals.kcal)})</div>
+    <div style="height:12px"></div>
+    ${bar("protein logged", st.protein, state.goals.protein * d, "protein", "g")}
+    <div class="avg-line">daily average: ${n1(st.protein / d)} g (target ${n1(state.goals.protein)})</div>
+    ${scope}
+    <div style="margin-top:14px">${balance}</div>`;
+}
+
+function renderRollup() {
+  const box = el("rollupView");
+  const recorded = state.days.filter((d) => d.meals_logged > 0 || d.energy_out_kcal != null);
+  if (!recorded.length) {
+    box.innerHTML = `<div class="block-card"><div class="empty-note">Nothing recorded yet.</div></div>`;
+    return;
+  }
+  const asc = [...recorded].reverse();
+  const weeks = [];
+  for (let i = 0; i < asc.length; i += 7) weeks.push(asc.slice(i, i + 7));
+
+  const blocks = weeks.map((week, wi) => {
+    const st = statsFor(week);
+    const weights = week.filter((d) => d.weight_kg != null);
+    return `
+      <div class="block-card">
+        <div class="block-title">
+          <h2>Week ${wi + 1}</h2>
+          <span class="sub">${week[0].date} – ${week[week.length - 1].date} · ${st.n} day${st.n === 1 ? "" : "s"}</span>
+        </div>
+        ${statsBlock(st)}
+        ${weights.length >= 2 ? `<div class="avg-line" style="margin-top:8px">
+          weight ${n1(weights[0].weight_kg)} kg → ${n1(weights[weights.length - 1].weight_kg)} kg</div>` : ""}
+      </div>`;
+  }).join("");
+
+  const all = statsFor(recorded);
+  const withIntake = recorded.filter((d) => d.energy_in_kcal != null);
+  const overKcal = withIntake.filter((d) => d.energy_in_kcal > state.goals.kcal).length;
+  const hitProtein = withIntake.filter((d) => (d.protein_g || 0) >= state.goals.protein).length;
+
+  box.innerHTML = blocks + `
+    <div class="block-card">
+      <div class="block-title"><h2>All days</h2>
+        <span class="sub">${all.n} recorded · ${all.intakeDays} with meals</span></div>
+      ${all.intakeDays ? `
+        ${bar("daily average calories", all.kcal / all.intakeDays, state.goals.kcal, "kcal", "kcal")}
+        ${bar("daily average protein", all.protein / all.intakeDays, state.goals.protein, "protein", "g")}
+        <div class="avg-line" style="margin-top:12px">
+          calorie target exceeded on ${overKcal} of ${all.intakeDays} logged days ·
+          protein target met on ${hitProtein} of ${all.intakeDays}
+        </div>`
+      : '<div class="empty-note">No meals logged yet.</div>'}
+    </div>`;
+}
+
+async function renderSystem() {
+  const box = el("systemView");
+  box.innerHTML = `<div class="block-card"><div class="empty-note">Checking…</div></div>`;
+  const t0 = performance.now();
+  try {
+    const data = await api("/api/status");
+    box.innerHTML = `
+      <div class="block-card">
+        <div class="block-title">
+          <h2>Where the data comes from</h2>
+          <span class="sub">round trip ${Math.round(performance.now() - t0)} ms</span>
+        </div>
+        <ul class="chain">
+          ${data.stages.map((s) => `
+            <li>
+              <span>
+                <span class="stage-name">${esc(s.stage)}</span>
+                <span class="stage-detail">${esc(s.detail)}</span>
+              </span>
+              <span style="text-align:right;white-space:nowrap">
+                <span class="status-pill ${esc(s.state)}">${esc(s.state)}</span>
+                ${s.ms == null ? "" : `<div class="lat">${s.ms} ms</div>`}
+              </span>
+            </li>`).join("")}
+        </ul>
+      </div>`;
+  } catch (err) {
+    box.innerHTML = `<div class="block-card">
+      <div class="block-title"><h2>The API did not answer</h2></div>
+      <div class="empty-note">${esc(err.message)}. The page is being served, so check that
+      the app container is running and that nginx proxies to it.</div></div>`;
+  }
 }
 
 // --- sign in ---------------------------------------------------------------
 
 function showLogin(message) {
-  el("cols").hidden = true;
-  el("who").textContent = "Not signed in";
+  el("main").hidden = true;
+  el("goalLine").textContent = "";
   const gate = el("gate");
   gate.hidden = false;
   gate.innerHTML = `
-    <div class="panel" style="max-width:26rem;margin-top:2rem">
-      <h2>Sign in</h2>
-      <form class="login" id="loginform">
-        <label>Email<input type="email" name="email" autocomplete="username" required></label>
-        <label>Password<input type="password" name="password" autocomplete="current-password" required></label>
-        <div class="err" id="loginerr"></div>
-        <div><button type="submit" id="loginbtn">Sign in</button></div>
+    <div class="summary" style="max-width:26rem">
+      <div class="summary-top"><h2>Sign in</h2></div>
+      <form class="login" id="loginForm">
+        <label class="field">email<input type="email" name="email" autocomplete="username" required></label>
+        <label class="field">password<input type="password" name="password" autocomplete="current-password" required></label>
+        <div class="err" id="loginErr">${esc(message || "")}</div>
+        <div><button class="primary" type="submit" id="loginBtn">Sign in</button></div>
       </form>
     </div>`;
-  if (message) el("loginerr").textContent = message;
-
-  el("loginform").addEventListener("submit", async (ev) => {
+  el("loginForm").addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const form = new FormData(ev.target);
-    const btn = el("loginbtn");
-    btn.disabled = true;
-    el("loginerr").textContent = "";
+    el("loginBtn").disabled = true;
+    el("loginErr").textContent = "";
     try {
       await api("/api/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: form.get("email"), password: form.get("password") }),
       });
-      gate.hidden = true;
-      gate.innerHTML = "";
+      gate.hidden = true; gate.innerHTML = "";
       boot();
     } catch (err) {
-      el("loginerr").textContent =
-        err.code === 401 ? "That email and password did not match." :
-        err.code === 429 ? "Too many attempts. Wait a few minutes." :
-        `Sign-in failed: ${err.message}`;
-      btn.disabled = false;
+      el("loginErr").textContent =
+        err.code === 401 ? "That email and password did not match."
+        : err.code === 429 ? "Too many attempts. Wait a few minutes."
+        : `Sign-in failed: ${err.message}`;
+      el("loginBtn").disabled = false;
     }
   });
-}
-
-function renderWho(me) {
-  const box = el("who");
-  box.textContent = "";
-  const name = document.createElement("span");
-  name.textContent = `${me.display_name} · ${me.timezone}`;
-  const out = document.createElement("button");
-  out.className = "linkish";
-  out.textContent = "Sign out";
-  out.addEventListener("click", async () => {
-    await api("/api/logout", { method: "POST" }).catch(() => {});
-    location.reload();
-  });
-  box.append(name, out);
-}
-
-// --- panels ----------------------------------------------------------------
-
-async function loadChain() {
-  const list = el("chain");
-  const note = el("chain-note");
-  const t0 = performance.now();
-  try {
-    const data = await api("/api/status");
-    list.innerHTML = "";
-    for (const s of data.stages) {
-      const li = document.createElement("li");
-      li.className = s.state;
-      li.innerHTML = `<span class="mark" aria-hidden="true"></span>
-        <span><span class="stage-name"></span><br><span class="stage-detail"></span></span>
-        <span class="lat"></span>`;
-      li.querySelector(".stage-name").textContent = s.stage;
-      li.querySelector(".stage-detail").textContent = `${s.state} — ${s.detail}`;
-      li.querySelector(".lat").textContent = s.ms == null ? "" : `${s.ms} ms`;
-      list.append(li);
-    }
-    note.textContent = `Round trip ${Math.round(performance.now() - t0)} ms.`;
-  } catch (err) {
-    panel(list.parentElement, "The page loaded but the API did not answer",
-      `${err.message}. The web server is serving files, so check that the app container is running and that nginx proxies /api/ to it.`);
-  }
-}
-
-const dash = '<span class="muted">—</span>';
-
-function dayRow(d) {
-  const known = d.energy_in_kcal != null && d.energy_out_kcal != null;
-  const bal = known ? d.energy_in_kcal - d.energy_out_kcal : null;
-  const inCell = d.energy_in_kcal == null ? dash
-    : `<span class="${d.intake_source === "claude-estimate" ? "est" : ""}">${d.energy_in_kcal}</span>`;
-  const outCell = d.energy_out_kcal == null ? dash
-    : d.energy_out_partial
-      ? `<span class="partial" title="active calories only — total not synced">${d.energy_out_kcal}</span>`
-      : `${d.energy_out_kcal}`;
-  return `<tr>
-    <td>${d.date}</td>
-    <td>${inCell}</td>
-    <td>${outCell}</td>
-    <td class="${bal == null ? "muted" : bal < 0 ? "neg" : "pos"}">${
-      bal == null ? dash : (bal > 0 ? "+" : "") + bal}</td>
-    <td>${d.weight_kg ?? dash}</td>
-    <td>${d.meals_logged}</td>
-  </tr>`;
-}
-
-async function loadDays() {
-  const box = el("days");
-  try {
-    const data = await api("/api/days?days=7");
-    if (!data.days.length) {
-      panel(box, "No days recorded yet",
-        "Log a meal through Claude, or run the Garmin sync, and the first row will appear here.");
-      return;
-    }
-    box.innerHTML = `<table>
-      <thead><tr><th>Date</th><th>In</th><th>Out</th><th>Balance</th><th>Weight</th><th>Meals</th></tr></thead>
-      <tbody>${data.days.map(dayRow).join("")}</tbody></table>
-      <p class="hint">Dates are days in ${data.timezone}. Underlined intake figures are
-      estimates from a meal description; everything else is measured.</p>`;
-  } catch (err) {
-    panel(box, "Could not load your days", err.code === 401
-      ? "Your session is not valid. Sign in again."
-      : `${err.message}. This is the database read path, so check the app's connection to Postgres.`);
-  }
 }
 
 // --- entry -----------------------------------------------------------------
 
+function render() {
+  renderGoalLine();
+  renderModeTabs();
+  if (state.mode === "days") { renderDayTabs(); renderDay(); }
+  else if (state.mode === "rollup") renderRollup();
+  else renderSystem();
+}
+
 async function boot() {
-  let me;
+  loadGoals();
   try {
-    me = await api("/api/me");
+    state.me = await api("/api/me");
   } catch (err) {
     if (err.code === 401) return showLogin();
-    el("who").textContent = "Cannot reach the API";
-    el("cols").hidden = false;
-    return panel(el("days"), "The API is not answering", err.message);
+    el("main").hidden = false;
+    el("systemView").hidden = false;
+    return renderSystem();
   }
   el("gate").hidden = true;
-  el("cols").hidden = false;
-  renderWho(me);
-  loadChain();
-  loadDays();
+  el("main").hidden = false;
+
+  const data = await api(`/api/days?days=${WINDOW_DAYS}`);
+  state.days = data.days || [];
+  state.activeDate = state.days.length ? state.days[0].date : null;
+  el("foot").textContent = state.days.length
+    ? `days shown in ${data.timezone}`
+    : "no days recorded yet — log a meal through Claude, or run the Garmin sync";
+  render();
 }
 
 boot();

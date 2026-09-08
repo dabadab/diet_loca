@@ -12,12 +12,13 @@ from __future__ import annotations
 import logging
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone as dt_timezone
+from datetime import date as date_cls, datetime, timezone as dt_timezone
 
 import psycopg
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastmcp.utilities.lifespan import combine_lifespans
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import auth, config, db, migrate, queries
@@ -217,6 +218,17 @@ def days(days: int = 7, user: auth.User = Depends(current_user)):
     return {"timezone": user.timezone, "days": rows}
 
 
+@app.get("/api/day/{day}")
+def day_detail(day: str, user: auth.User = Depends(current_user)):
+    """One day in full: its meals with their items, and that day's measurements."""
+    try:
+        when = date_cls.fromisoformat(day)
+    except ValueError:
+        raise HTTPException(400, "date must be YYYY-MM-DD") from None
+    with db.user_tx(user.user_id) as cur:
+        return queries.day_detail(cur, when)
+
+
 @app.get("/api/status")
 def status(user: auth.User = Depends(current_user)):
     """
@@ -294,6 +306,11 @@ def status(user: auth.User = Depends(current_user)):
                 "ms": None})
 
     return {"checked_at": time.time(), "stages": stages}
+
+
+# Self-hosted fonts and any other page assets. Mounted before the MCP catch-all.
+if settings.web_dir.is_dir():
+    app.mount("/static", StaticFiles(directory=settings.web_dir), name="static")
 
 
 # The consent screen. Registered before the mount below so it wins, and it has
