@@ -53,6 +53,17 @@ class Settings:
 
 @functools.lru_cache(maxsize=1)
 def load() -> Settings:
+    public_url = os.environ.get("MCP_PUBLIC_URL", "").strip()
+    # Fail here with something actionable rather than several frames deep in a
+    # URL validator: an authorization server with no address to advertise
+    # cannot be built, and a container that restart-loops on a pydantic
+    # traceback tells nobody why.
+    if _flag("OAUTH_ENABLED", False) and not public_url:
+        raise RuntimeError(
+            "OAUTH_ENABLED is set but MCP_PUBLIC_URL is empty. OAuth metadata "
+            "advertises absolute URLs, so set MCP_PUBLIC_URL to the public "
+            "https root (e.g. https://diet.example.com, no trailing slash), or "
+            "set OAUTH_ENABLED=0 to run with bearer tokens only.")
     dsn = os.environ.get("DATABASE_URL", "").strip()
     if not dsn:
         raise RuntimeError(
@@ -71,7 +82,7 @@ def load() -> Settings:
         cookie_secure=_flag("COOKIE_SECURE", True),
         cookie_name=os.environ.get("COOKIE_NAME", "diet_session"),
         web_dir=Path(os.environ.get("WEB_DIR", _HERE.parent / "web")),
-        mcp_public_url=os.environ.get("MCP_PUBLIC_URL", "").strip(),
+        mcp_public_url=public_url,
         garmin_stale_after_hours=int(os.environ.get("GARMIN_STALE_AFTER_HOURS", "24")),
         pool_max_size=int(os.environ.get("POOL_MAX_SIZE", "10")),
         mcp_enabled=_flag("MCP_ENABLED", True),
@@ -82,7 +93,7 @@ def load() -> Settings:
         # OAuth needs a public https base URL, because the metadata documents
         # advertise absolute endpoints and Claude fetches them from outside.
         # Without one there is nothing to advertise, so it stays off.
-        oauth_enabled=_flag("OAUTH_ENABLED", bool(os.environ.get("MCP_PUBLIC_URL", "").strip())),
+        oauth_enabled=_flag("OAUTH_ENABLED", bool(public_url)) and bool(public_url),
         oauth_access_ttl_minutes=int(os.environ.get("OAUTH_ACCESS_TTL_MINUTES", "60")),
         oauth_refresh_ttl_days=int(os.environ.get("OAUTH_REFRESH_TTL_DAYS", "30")),
     )

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import html
 import logging
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -57,12 +58,41 @@ code { font-family:ui-monospace,Consolas,monospace; font-size:0.85em; word-break
 """
 
 
-def _page(title: str, body: str, status: int = 200) -> HTMLResponse:
+def _origin(url: str) -> str | None:
+    """Scheme and authority of a redirect URI, for use in a CSP form-action."""
+    try:
+        parts = urlsplit(str(url))
+    except ValueError:
+        return None
+    return f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else None
+
+
+def _csp(redirect_uri: str | None = None) -> str:
+    """
+    The app-wide policy sets form-action 'self', which is right for the SPA and
+    completely wrong here: approving is a form submission whose entire purpose
+    is to redirect to the client's callback, and form-action governs the
+    redirect chain as well as the initial POST. With 'self' alone the browser
+    silently refuses to navigate and the approval appears to do nothing.
+    So the client's origin is added, per request, from the redirect URI the
+    authorization server already validated against the registration.
+    """
+    origin = _origin(redirect_uri) if redirect_uri else None
+    form_action = "'self'" + (f" {origin}" if origin else "")
+    return ("default-src 'self'; script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+            f"form-action {form_action}; frame-ancestors 'none'; base-uri 'none'")
+
+
+def _page(title: str, body: str, status: int = 200,
+          redirect_uri: str | None = None) -> HTMLResponse:
     return HTMLResponse(
         f"<!doctype html><html lang=en><head><meta charset=utf-8>"
         f"<meta name=viewport content='width=device-width, initial-scale=1'>"
         f"<title>{html.escape(title)}</title><style>{_STYLE}</style></head>"
-        f"<body><div class=card>{body}</div></body></html>", status_code=status)
+        f"<body><div class=card>{body}</div></body></html>", status_code=status,
+        # Set explicitly so the middleware's setdefault leaves it alone.
+        headers={"Content-Security-Policy": _csp(redirect_uri)})
 
 
 def _problem(message: str, status: int = 400) -> HTMLResponse:
@@ -116,7 +146,7 @@ async def consent_page(request: Request, pending: str = ""):
     scopes = req["scopes"] or []
     scope_list = ("<ul>" + "".join(f"<li>{html.escape(s)}</li>" for s in scopes) + "</ul>"
                   if scopes else "")
-    return _page("Authorise access", f"""
+    return _page("Authorise access", redirect_uri=str(req["redirect_uri"]), body=f"""
       <h1>Allow {name} to use your diet log?</h1>
       <p>It will be able to read your meals and measurements, and to log and
          correct meals on your behalf. It cannot see your password, your
@@ -147,4 +177,5 @@ async def consent_submit(request: Request, pending: str = Form(...),
     # browser POST to Claude's callback, which only answers GET. That is a
     # documented way to break the handshake.
     return RedirectResponse(target, status_code=303,
-                            headers={"Cache-Control": "no-store"})
+                            headers={"Cache-Control": "no-store",
+                                     "Content-Security-Policy": _csp(target)})
