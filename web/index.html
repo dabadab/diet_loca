@@ -73,19 +73,6 @@
   .mode-tab:last-child { border-right: none; }
   .mode-tab.active { background: var(--leaf-dark); color: var(--card); }
 
-  .day-tabs {
-    display: flex; gap: 6px; overflow-x: auto; margin-bottom: 18px; padding-bottom: 4px;
-  }
-  .day-tab {
-    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.78rem;
-    padding: 7px 12px; border: 1.5px solid var(--ink); background: transparent;
-    color: var(--ink); cursor: pointer; white-space: nowrap; border-radius: 3px;
-  }
-  .day-tab.active { background: var(--ink); color: var(--paper); }
-  .day-tab.blank { border-style: dashed; border-color: var(--ink-soft); color: var(--ink-soft); }
-  .day-tab.today::after { content: " ●"; color: var(--tomato); }
-  .day-tab.active.today::after { color: var(--butter); }
-
   .summary, .block-card {
     background: var(--card); border: 1.5px solid var(--ink);
     box-shadow: 4px 4px 0 var(--ink); padding: 20px 22px; margin-bottom: 18px;
@@ -131,15 +118,6 @@
   .bar-fill.protein { background: var(--leaf); }
   .bar-fill.over { background: var(--tomato); }
 
-  .expenditure-row {
-    display: flex; align-items: center; gap: 10px;
-    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.82rem;
-    margin-bottom: 16px; padding: 10px 12px; background: var(--paper);
-    border: 1px dashed var(--ink-soft); border-radius: 4px; flex-wrap: wrap;
-  }
-  .expenditure-row .label { color: var(--ink-soft); flex: 1; }
-  .expenditure-row .figure { font-weight: 600; }
-
   .balance-line {
     font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.78rem; color: var(--ink-soft);
   }
@@ -147,35 +125,50 @@
   .balance-line .deficit { color: var(--leaf-dark); font-weight: 600; }
   .balance-line .surplus { color: var(--tomato); font-weight: 600; }
 
-  .entries { margin-top: 18px; }
-  .entries h3 {
+  .table-wrap { overflow-x: auto; }
+  table.days { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+  table.days th {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.72rem;
+    font-weight: 500; color: var(--ink-soft); text-align: right; white-space: nowrap;
+    padding: 0 0 8px 14px; border-bottom: 1.5px solid var(--ink);
+  }
+  table.days th:first-child, table.days td:first-child { text-align: left; padding-left: 0; }
+  table.days td {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.85rem;
+    text-align: right; white-space: nowrap; padding: 9px 0 9px 14px;
+    border-bottom: 1px dotted var(--paper-line);
+  }
+  table.days tr:last-child td { border-bottom: none; }
+  table.days tbody tr.day-row { cursor: pointer; }
+  table.days tbody tr.day-row:hover td { background: var(--paper); }
+  table.days tr.today td { font-weight: 600; }
+  td.date { font-family: 'Karla', sans-serif; font-size: 0.9rem; }
+  td.date::before {
+    content: "▸"; color: var(--ink-soft); display: inline-block; width: 1.1em;
+    font-size: 0.8em; transition: transform 0.15s ease;
+  }
+  tr.open td.date::before { transform: rotate(90deg); }
+  .est { border-bottom: 1px dotted var(--ink-soft); }
+  .partial { border-bottom: 1px dotted var(--butter); }
+  .neg { color: var(--leaf-dark); font-weight: 600; }
+  .pos { color: var(--tomato); font-weight: 600; }
+  .muted { color: var(--ink-soft); }
+  tr.detail > td {
+    background: var(--paper); padding: 4px 0 12px 14px; border-bottom: 1px dotted var(--paper-line);
+  }
+  .meal-line {
+    display: flex; justify-content: space-between; gap: 12px; padding: 5px 0;
+    font-family: 'Karla', sans-serif; font-size: 0.88rem; text-align: left;
+  }
+  .meal-line .nums {
     font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.78rem;
-    color: var(--ink-soft); margin: 0 0 8px; font-weight: 500;
-  }
-  .entry-row {
-    display: flex; justify-content: space-between; align-items: baseline;
-    padding: 9px 0; border-bottom: 1px dotted var(--paper-line); font-size: 0.92rem; gap: 10px;
-  }
-  .entry-row:last-child { border-bottom: none; }
-  .entry-name { flex: 1; }
-  .entry-nums {
-    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.8rem;
     color: var(--ink-soft); white-space: nowrap;
   }
-  .entry-items {
-    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.74rem;
-    color: var(--ink-soft); padding: 4px 0 2px 14px; border-left: 2px solid var(--paper-line);
-    margin: 2px 0 6px;
+  .meal-items {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.72rem;
+    color: var(--ink-soft); padding-left: 12px; border-left: 2px solid var(--paper-line);
+    margin: 2px 0 6px; text-align: left;
   }
-  details > summary { cursor: pointer; list-style: none; }
-  details > summary::-webkit-details-marker { display: none; }
-  .entry-name::before {
-    content: "▸"; color: var(--ink-soft); font-size: 0.8em; display: inline-block;
-    width: 1em; transition: transform 0.15s ease;
-  }
-  details[open] .entry-name::before { transform: rotate(90deg); }
-  details[open] .entry-row { border-bottom: none; }
-  details > summary:hover .entry-name { color: var(--leaf-dark); }
 
   .empty-note { color: var(--ink-soft); font-size: 0.88rem; font-style: italic; padding: 6px 0; }
 
@@ -234,10 +227,7 @@
 
   <div id="main" hidden>
     <div class="mode-tabs" id="modeTabs"></div>
-    <div id="dayView">
-      <div class="day-tabs" id="dayTabs"></div>
-      <div id="summaryBox"></div>
-    </div>
+    <div id="dayView"></div>
     <div id="rollupView" hidden></div>
     <div id="systemView" hidden></div>
   </div>
@@ -255,7 +245,7 @@ const WINDOW_DAYS = 28;
 let state = {
   mode: "days",
   days: [],          // newest first, from /api/days
-  activeDate: null,
+  expanded: new Set(),   // dates whose meals are shown
   detail: {},        // date -> /api/day payload
   me: null,
   goals: { kcal: 1800, protein: 150 },
@@ -360,147 +350,120 @@ function renderModeTabs() {
   el("systemView").hidden = state.mode !== "system";
 }
 
-function renderDayTabs() {
-  const box = el("dayTabs");
-  box.innerHTML = "";
-  const today = state.days.length ? state.days[0].date : null;
-  // Oldest on the left, so the newest day sits where the eye ends up.
-  [...state.days].reverse().forEach((d) => {
-    const b = document.createElement("button");
-    const empty = !d.meals_logged && d.energy_out_kcal == null && d.weight_kg == null;
-    b.className = "day-tab"
-      + (d.date === state.activeDate ? " active" : "")
-      + (empty ? " blank" : "")
-      + (d.date === today ? " today" : "");
+// The day list: every day in the window on one screen with its own totals,
+// which is the view that actually answers "how am I doing". A row expands to
+// the meals behind its numbers.
+function renderDays() {
+  const box = el("dayView");
+  if (!state.days.length) {
+    box.innerHTML = `<div class="summary"><div class="empty-note">
+      No days recorded yet. Log a meal through Claude, or run the Garmin sync,
+      and the first row appears here.</div></div>`;
+    return;
+  }
+  const today = state.days[0].date;
+
+  // Any expanded row without its detail yet gets fetched here rather than only
+  // in the click handler, so an expanded row can never stick on "Loading…".
+  for (const date of state.expanded) {
+    if (!state.detail[date]) loadDetail(date);
+  }
+
+  const rows = state.days.map((d) => {
+    const known = d.energy_in_kcal != null && d.energy_out_kcal != null;
+    const bal = known ? d.energy_in_kcal - d.energy_out_kcal : null;
+    const inCell = d.energy_in_kcal == null ? '<span class="muted">—</span>'
+      : `<span class="${d.intake_source === "claude-estimate" ? "est" : ""}"
+           title="${d.intake_source === "claude-estimate" ? "estimated from a description" : "measured"}"
+           >${n0(d.energy_in_kcal)}</span>`;
+    const outCell = d.energy_out_kcal == null ? '<span class="muted">—</span>'
+      : d.energy_out_partial
+        ? `<span class="partial" title="active calories only — whole-day total not synced">${n0(d.energy_out_kcal)}</span>`
+        : n0(d.energy_out_kcal);
     const dt = new Date(d.date + "T12:00:00");
-    b.textContent = dt.toLocaleDateString(undefined, { weekday: "short", day: "numeric" });
-    b.title = d.date;
-    b.onclick = () => { state.activeDate = d.date; render(); };
-    box.append(b);
-  });
-  const active = box.querySelector(".day-tab.active");
-  if (active) active.scrollIntoView({ block: "nearest", inline: "nearest" });
-}
-
-function renderDay() {
-  const box = el("summaryBox");
-  const day = state.days.find((d) => d.date === state.activeDate);
-  if (!day) { box.innerHTML = `<div class="summary"><div class="empty-note">No day selected.</div></div>`; return; }
-
-  const dt = new Date(day.date + "T12:00:00");
-  const heading = dt.toLocaleDateString(undefined,
-    { weekday: "long", year: "numeric", month: "long", day: "numeric" });
-  const pill = day.intake_source
-    ? `<span class="status-pill ${day.intake_source === "claude-estimate" ? "estimated" : "measured"}">${
-        day.intake_source === "claude-estimate" ? "intake estimated" : "intake measured"}</span>`
-    : `<span class="status-pill">nothing logged</span>`;
-
-  const detail = state.detail[day.date];
-  const entries = detail ? detail.meals : null;
+    const label = dt.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+    const open = state.expanded.has(d.date);
+    return `
+      <tr class="day-row${d.date === today ? " today" : ""}${open ? " open" : ""}" data-date="${d.date}">
+        <td class="date">${esc(label)}${d.date === today ? " · today" : ""}</td>
+        <td>${inCell}</td>
+        <td>${d.protein_g == null ? '<span class="muted">—</span>' : n1(d.protein_g)}</td>
+        <td>${outCell}</td>
+        <td class="${bal == null ? "muted" : bal < 0 ? "neg" : "pos"}">${
+          bal == null ? "—" : (bal > 0 ? "+" : "") + n0(bal)}</td>
+        <td>${d.weight_kg == null ? '<span class="muted">—</span>' : n1(d.weight_kg)}</td>
+        <td>${d.meals_logged || '<span class="muted">—</span>'}</td>
+      </tr>
+      ${open ? `<tr class="detail"><td colspan="7">${dayDetailHtml(d.date)}</td></tr>` : ""}`;
+  }).join("");
 
   box.innerHTML = `
     <div class="summary">
-      <div class="summary-top"><h2>${esc(heading)}</h2>${pill}</div>
-
-      <div class="expenditure-row">
-        <span class="label">measured expenditure (Garmin)</span>
-        <span class="figure">${n0(day.energy_out_kcal)} kcal</span>
-        ${day.weight_kg != null ? `<span class="label" style="flex:0 0 auto">· weight</span>
-          <span class="figure">${n1(day.weight_kg)} kg</span>` : ""}
+      <div class="summary-top">
+        <h2>Recent days</h2>
+        <span class="block-title"><span class="sub">${state.days.length} days · newest first</span></span>
       </div>
-
-      ${balanceLine(day.energy_in_kcal, day.energy_out_kcal, { partial: day.energy_out_partial })}
-      <div style="height:16px"></div>
-
-      ${bar("calories", day.energy_in_kcal, state.goals.kcal, "kcal", "kcal")}
-      ${bar("protein", day.protein_g, state.goals.protein, "protein", "g")}
-
-      ${(day.carb_g != null || day.fat_g != null) ? `<div class="avg-line">
-        carbs ${n1(day.carb_g)} g · fat ${n1(day.fat_g)} g</div>` : ""}
-
-      <div class="entries">
-        <h3>Meals${day.meals_logged ? ` (${day.meals_logged})` : ""}</h3>
-        ${entries == null ? '<div class="empty-note">Loading…</div>'
-          : entries.length === 0
-            ? '<div class="empty-note">Nothing logged on this day.</div>'
-            : entries.map(mealRow).join("")}
+      <div class="table-wrap">
+        <table class="days">
+          <thead><tr>
+            <th>Date</th><th>In</th><th>Protein</th><th>Out</th>
+            <th>Balance</th><th>Weight</th><th>Meals</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
       </div>
-
       <div class="avg-line" style="margin-top:14px">
-        Meals are logged by describing them to Claude, which writes them here.
+        kcal in / g protein / kcal out / balance / kg. Underlined intake is estimated
+        from a description; everything else is measured. Click a day for its meals.
       </div>
     </div>`;
 
-  if (entries == null) loadDetail(day.date);
+  box.querySelectorAll("tr.day-row").forEach((tr) => {
+    tr.addEventListener("click", () => {
+      const date = tr.dataset.date;
+      if (state.expanded.has(date)) state.expanded.delete(date);
+      else { state.expanded.add(date); if (!state.detail[date]) loadDetail(date); }
+      renderDays();
+    });
+  });
 }
 
-function mealRow(m) {
-  const items = (m.items || []).map((i) =>
-    `${esc(i.food)} — ${n0(i.kcal)} kcal${i.grams != null ? `, ${n0(i.grams)} g` : ""}${
-      i.protein_g != null ? `, ${n1(i.protein_g)} g protein` : ""}`).join("<br>");
-  const when = new Date(m.eaten_at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-  const protein = (m.items || []).reduce((a, i) => a + Number(i.protein_g || 0), 0);
-  return `
-    <details>
-      <summary>
-        <div class="entry-row">
-          <span class="entry-name">${esc(m.description)}</span>
-          <span class="entry-nums">${when} · ${n0(m.kcal)} kcal · ${n1(protein)} g</span>
-        </div>
-      </summary>
-      <div class="entry-items">${items || "no breakdown recorded"}</div>
-    </details>`;
+function dayDetailHtml(date) {
+  const detail = state.detail[date];
+  if (!detail) return '<div class="empty-note">Loading…</div>';
+  if (!detail.meals.length) {
+    return `<div class="empty-note">Nothing logged on this day.${
+      detail.measurements && detail.measurements.length
+        ? ` ${detail.measurements.length} measurement${detail.measurements.length === 1 ? "" : "s"} from Garmin.`
+        : ""}</div>`;
+  }
+  return detail.meals.map((m) => {
+    const when = new Date(m.eaten_at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    const protein = (m.items || []).reduce((a, i) => a + Number(i.protein_g || 0), 0);
+    const items = (m.items || []).map((i) =>
+      `${esc(i.food)} — ${n0(i.kcal)} kcal${i.grams != null ? `, ${n0(i.grams)} g` : ""}${
+        i.protein_g != null ? `, ${n1(i.protein_g)} g protein` : ""}`).join("<br>");
+    return `
+      <div class="meal-line">
+        <span>${esc(m.description)}</span>
+        <span class="nums">${when} · ${n0(m.kcal)} kcal · ${n1(protein)} g</span>
+      </div>
+      <div class="meal-items">${items || "no breakdown recorded"}</div>`;
+  }).join("");
 }
+
+const inFlight = new Set();
 
 async function loadDetail(date) {
+  if (inFlight.has(date)) return;
+  inFlight.add(date);
   try {
     state.detail[date] = await api(`/api/day/${date}`);
   } catch (err) {
-    state.detail[date] = { meals: [], error: err.message };
+    state.detail[date] = { meals: [], measurements: [], error: err.message };
   }
-  if (state.activeDate === date && state.mode === "days") renderDay();
-}
-
-// Days where Garmin synced but nothing was eaten are not zero-calorie days --
-// they are days with no intake data. Averaging them in produces a nonsense
-// deficit, so intake, expenditure and balance are each computed over only the
-// days that actually carry that figure, and the counts are shown.
-function statsFor(list) {
-  const withIntake = list.filter((d) => d.energy_in_kcal != null);
-  const withOut = list.filter((d) => d.energy_out_kcal != null);
-  const both = list.filter((d) => d.energy_in_kcal != null && d.energy_out_kcal != null);
-  const add = (xs, k) => xs.reduce((a, d) => a + (d[k] || 0), 0);
-  return {
-    n: list.length,
-    intakeDays: withIntake.length, kcal: add(withIntake, "energy_in_kcal"),
-    protein: add(withIntake, "protein_g"),
-    outDays: withOut.length, out: add(withOut, "energy_out_kcal"),
-    bothDays: both.length, bothIn: add(both, "energy_in_kcal"),
-    bothOut: add(both, "energy_out_kcal"),
-  };
-}
-
-function statsBlock(st) {
-  if (!st.intakeDays) {
-    return `<div class="empty-note">No meals logged${
-      st.outDays ? ` — expenditure synced for ${st.outDays} of ${st.n} days` : ""}.</div>`;
-  }
-  const d = st.intakeDays;
-  const scope = d === st.n ? "" :
-    `<div class="avg-line" style="opacity:.75">based on the ${d} of ${st.n} day${
-      st.n === 1 ? "" : "s"} with meals logged</div>`;
-  const balance = st.bothDays
-    ? balanceLine(st.bothIn, st.bothOut, { note: st.bothDays < st.n
-        ? `<br><span style="opacity:.75">(over the ${st.bothDays} day${st.bothDays === 1 ? "" : "s"} with both figures)</span>` : "" })
-    : `<div class="balance-line">energy balance: <span class="value">—</span> (no day has both intake and expenditure)</div>`;
-  return `
-    ${bar("calories logged", st.kcal, state.goals.kcal * d, "kcal", "kcal")}
-    <div class="avg-line">daily average: ${n0(st.kcal / d)} kcal (target ${n0(state.goals.kcal)})</div>
-    <div style="height:12px"></div>
-    ${bar("protein logged", st.protein, state.goals.protein * d, "protein", "g")}
-    <div class="avg-line">daily average: ${n1(st.protein / d)} g (target ${n1(state.goals.protein)})</div>
-    ${scope}
-    <div style="margin-top:14px">${balance}</div>`;
+  inFlight.delete(date);
+  if (state.mode === "days") renderDays();
 }
 
 function renderRollup() {
@@ -628,7 +591,7 @@ function showLogin(message) {
 function render() {
   renderGoalLine();
   renderModeTabs();
-  if (state.mode === "days") { renderDayTabs(); renderDay(); }
+  if (state.mode === "days") renderDays();
   else if (state.mode === "rollup") renderRollup();
   else renderSystem();
 }
@@ -648,7 +611,6 @@ async function boot() {
 
   const data = await api(`/api/days?days=${WINDOW_DAYS}`);
   state.days = data.days || [];
-  state.activeDate = state.days.length ? state.days[0].date : null;
   el("foot").textContent = state.days.length
     ? `days shown in ${data.timezone}`
     : "no days recorded yet — log a meal through Claude, or run the Garmin sync";
