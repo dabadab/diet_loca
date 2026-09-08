@@ -29,23 +29,36 @@ with `0` so login works over plain http on localhost) and put TLS in front.
 
 ## Behind nginx
 
-The app binds to loopback only. A minimal front:
+The app binds to loopback only. A complete server block — `location` is only
+valid inside `server`, so this is the whole file, not a fragment:
 
 ```nginx
-location / {
-    proxy_pass http://127.0.0.1:8080;
-    proxy_set_header Host              $host;
-    proxy_set_header X-Forwarded-For   $remote_addr;
-    proxy_set_header X-Forwarded-Proto $scheme;
+server {
+    listen 80;
+    listen [::]:80;
+    server_name diet.example.com;
 
-    # Required for MCP: responses are streamed, and buffering them is the most
-    # common cause of a client that connects but never receives anything.
-    proxy_http_version 1.1;
-    proxy_set_header Connection '';
-    proxy_buffering off;
-    proxy_read_timeout 300s;
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-For   $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Required for MCP: responses are streamed, and buffering them is the most
+        # common cause of a client that connects but never receives anything.
+        proxy_http_version 1.1;
+        proxy_set_header Connection '';
+        proxy_buffering off;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
 }
 ```
+
+Then `nginx -t && systemctl reload nginx`, and `certbot --nginx -d
+diet.example.com` to add TLS — it rewrites this file in place. Afterwards set
+`MCP_PUBLIC_URL=https://diet.example.com` and `COOKIE_SECURE=1` in `.env` and
+`docker compose up -d` to pick them up.
 
 Do not put CDN bot-protection in front of `/mcp`. Anthropic's egress range is
 `160.79.104.0/21`, and a WAF that lets the OAuth traffic through while blocking
