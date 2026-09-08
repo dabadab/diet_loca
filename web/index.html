@@ -29,7 +29,31 @@
     padding: 28px 16px 60px;
   }
 
-  .wrap { max-width: 720px; margin: 0 auto; }
+  /* Wide enough for the day list beside the day itself; the other views keep a
+     reading width so they are not stretched across a desktop monitor. */
+  .wrap { max-width: 1160px; margin: 0 auto; }
+  #rollupView, #systemView, #gate { max-width: 760px; margin: 0 auto; }
+  header, .mode-tabs, .foot-note { max-width: 1160px; }
+
+  /* Master-detail when there is room, stacked when there is not. */
+  .day-grid { display: grid; gap: 20px; }
+  .day-grid > * { min-width: 0; }
+  @media (min-width: 1040px) {
+    .day-grid { grid-template-columns: minmax(0, 560px) minmax(0, 1fr); align-items: start; }
+    /* The list is long; keep the selected day in view while scrolling it. */
+    .day-grid .day-detail { position: sticky; top: 20px; }
+    .day-grid table.days td, .day-grid table.days th { padding-left: 9px; }
+    .day-grid table.days td { font-size: 0.8rem; }
+    .day-grid table.days th { font-size: 0.66rem; }
+    .day-grid td.date { font-size: 0.84rem; }
+  }
+  @media (max-width: 1039px) {
+    /* Stacked: the day itself first, the list under it. */
+    .day-grid .day-detail { order: -1; }
+  }
+  @media (max-width: 760px) {
+    .wrap, header, .mode-tabs, .foot-note { max-width: 720px; }
+  }
 
   header {
     display: flex; justify-content: space-between; align-items: flex-end;
@@ -398,13 +422,16 @@ function renderDays() {
   if (!state.activeDate || !state.days.some((d) => d.date === state.activeDate)) {
     state.activeDate = state.days[0].date;
   }
-  box.innerHTML = dayCard() + dayListCard();
+  box.innerHTML = `<div class="day-grid">${dayListCard()}${dayCard()}</div>`;
 
   box.querySelectorAll("tr.day-row").forEach((tr) => {
     tr.addEventListener("click", () => {
       state.activeDate = tr.dataset.date;
       renderDays();
-      box.scrollIntoView({ behavior: "smooth", block: "start" });
+      // Only worth scrolling when the day sits below the list rather than beside it.
+      if (window.matchMedia("(max-width: 1039px)").matches) {
+        el("dayView").scrollIntoView({ behavior: "smooth", block: "start" });
+      }
     });
   });
 }
@@ -423,7 +450,7 @@ function dayCard() {
   if (!detail) loadDetail(d.date);
 
   return `
-    <div class="summary">
+    <div class="summary day-detail">
       <div class="summary-top"><h2>${esc(heading)}</h2>${pill}</div>
 
       <div class="expenditure-row">
@@ -496,7 +523,7 @@ function dayListCard() {
   }).join("");
 
   return `
-    <div class="summary">
+    <div class="summary day-list">
       <div class="summary-top"><h2>All days</h2>
         <span class="sub">${state.days.length} days · newest first</span></div>
       <div class="table-wrap">
@@ -510,7 +537,7 @@ function dayListCard() {
       </div>
       <div class="avg-line" style="margin-top:14px">
         kcal in / g protein / kcal out / balance / kg. Underlined intake is estimated
-        from a description. Pick a day to see it above.
+        from a description. Pick a day to see it in full.
       </div>
     </div>`;
 }
