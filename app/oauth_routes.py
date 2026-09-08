@@ -28,33 +28,63 @@ settings = config.load()
 router = APIRouter()
 
 _STYLE = """
-:root { --paper:#edf0f1; --card:#f7f8f9; --ink:#16232b; --ink-dim:#5d6d76;
-        --line:#cfd6da; --ok:#2b6b5f; --down:#9a3a2c; --focus:#1f5f8b; }
-@media (prefers-color-scheme: dark) {
-  :root { --paper:#151b1f; --card:#1c2429; --ink:#e2e8ea; --ink-dim:#94a3aa;
-          --line:#2f3a41; --ok:#6fb6a4; --down:#d98274; --focus:#7fb6da; } }
+:root {
+  --paper:#F6F1E4; --paper-line:#DCD4BC; --ink:#2B2A24; --ink-soft:#6B6553;
+  --tomato:#B5452B; --leaf:#4A6B3D; --leaf-dark:#33492A; --card:#FFFDF6;
+}
 * { box-sizing:border-box; }
-body { margin:0; padding:3rem 1.25rem; background:var(--paper); color:var(--ink);
-       font-family:"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif; font-size:15px;
-       line-height:1.5; }
-.card { max-width:30rem; margin:0 auto; background:var(--card); border:1px solid var(--line);
-        border-radius:5px; padding:1.5rem 1.6rem; }
-h1 { font-size:1.15rem; margin:0 0 0.4rem; }
-p { margin:0.5rem 0; color:var(--ink-dim); }
-strong { color:var(--ink); }
-ul { margin:0.5rem 0 0; padding-left:1.1rem; color:var(--ink-dim); font-size:0.9rem; }
-.who { font-size:0.85rem; color:var(--ink-dim); margin-top:1.2rem;
-       border-top:1px solid var(--line); padding-top:0.8rem; }
-form.actions { display:flex; gap:0.6rem; margin-top:1.4rem; }
-label { display:grid; gap:0.2rem; font-size:0.85rem; color:var(--ink-dim); margin-bottom:0.7rem; }
-input { font:inherit; color:var(--ink); background:var(--paper); border:1px solid var(--line);
-        border-radius:3px; padding:0.4rem 0.5rem; }
-button { font:inherit; font-size:0.92rem; border-radius:3px; padding:0.45rem 1.1rem;
-         cursor:pointer; border:1px solid var(--line); background:var(--paper); color:var(--ink); }
-button.primary { background:var(--ok); border-color:var(--ok); color:var(--paper); font-weight:500; }
-button:hover { filter:brightness(1.06); }
-.err { color:var(--down); font-size:0.85rem; min-height:1.2em; }
-code { font-family:ui-monospace,Consolas,monospace; font-size:0.85em; word-break:break-all; }
+body {
+  margin:0; padding:44px 16px 60px; background:var(--paper);
+  background-image:repeating-linear-gradient(var(--paper-line) 0 1px, transparent 1px 32px);
+  color:var(--ink); font-family:'Karla','Segoe UI',system-ui,sans-serif; font-size:15px;
+  line-height:1.55;
+}
+.card {
+  max-width:30rem; margin:0 auto; background:var(--card); border:1.5px solid var(--ink);
+  box-shadow:4px 4px 0 var(--ink); padding:24px 26px;
+}
+h1 {
+  font-family:'Fraunces',Georgia,serif; font-weight:600; font-size:1.35rem;
+  margin:0 0 10px; letter-spacing:-0.01em;
+}
+p { margin:8px 0; color:var(--ink-soft); }
+strong { color:var(--ink); font-weight:700; }
+ul {
+  margin:10px 0 0; padding-left:1.1rem; color:var(--ink-soft);
+  font-family:'IBM Plex Mono',ui-monospace,monospace; font-size:0.8rem;
+}
+.who {
+  font-family:'IBM Plex Mono',ui-monospace,monospace; font-size:0.76rem; color:var(--ink-soft);
+  margin-top:20px; border-top:1px dotted var(--paper-line); padding-top:12px; line-height:1.7;
+}
+label {
+  display:grid; gap:0.2rem; margin-bottom:0.8rem;
+  font-family:'IBM Plex Mono',ui-monospace,monospace; font-size:0.76rem; color:var(--ink-soft);
+}
+input {
+  font-family:'Karla',sans-serif; font-size:0.92rem; padding:9px 10px;
+  border:1.5px solid var(--ink); border-radius:3px; background:var(--paper); color:var(--ink);
+}
+input:focus { outline:2px solid var(--leaf); outline-offset:1px; }
+form.actions { display:flex; gap:10px; margin-top:22px; }
+button {
+  font-family:'IBM Plex Mono',ui-monospace,monospace; font-size:0.85rem; font-weight:600;
+  border-radius:3px; padding:10px 18px; cursor:pointer;
+  border:1.5px solid var(--ink); background:var(--paper); color:var(--ink);
+}
+button:hover { background:var(--card); }
+button.primary { background:var(--leaf-dark); border-color:var(--leaf-dark); color:var(--card); }
+button.primary:hover { background:var(--leaf); border-color:var(--leaf); }
+.err {
+  color:var(--tomato); font-size:0.8rem; min-height:1.2em; margin-bottom:6px;
+  font-family:'IBM Plex Mono',ui-monospace,monospace;
+}
+code {
+  font-family:'IBM Plex Mono',ui-monospace,monospace; font-size:0.85em; color:var(--ink);
+  /* anywhere, not break-all: only break when the URL genuinely overflows,
+     rather than splitting "https" across lines. */
+  overflow-wrap:anywhere; display:block; margin-top:2px;
+}
 """
 
 
@@ -89,7 +119,9 @@ def _page(title: str, body: str, status: int = 200,
     return HTMLResponse(
         f"<!doctype html><html lang=en><head><meta charset=utf-8>"
         f"<meta name=viewport content='width=device-width, initial-scale=1'>"
-        f"<title>{html.escape(title)}</title><style>{_STYLE}</style></head>"
+        f"<title>{html.escape(title)}</title>"
+        f"<link rel=stylesheet href='/static/fonts.css'>"
+        f"<style>{_STYLE}</style></head>"
         f"<body><div class=card>{body}</div></body></html>", status_code=status,
         # Set explicitly so the middleware's setdefault leaves it alone.
         headers={"Content-Security-Policy": _csp(redirect_uri)})
@@ -158,7 +190,8 @@ async def consent_page(request: Request, pending: str = ""):
         <button type=submit name=decision value=deny>Deny</button>
       </form>
       <div class=who>Signed in as {html.escape(user.display_name)}
-        ({html.escape(user.email)}). Redirects to <code>{html.escape(str(req['redirect_uri']))}</code>.</div>
+        ({html.escape(user.email)}). Redirects to
+        <code>{html.escape(str(req['redirect_uri']))}</code></div>
     """)
 
 
