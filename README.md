@@ -110,6 +110,9 @@ not a second login. Manage what is connected:
 ```sh
 docker compose exec app python -m app.manage list-connections
 docker compose exec app python -m app.manage revoke-connection <email> [client_id]
+docker compose exec app python -m app.manage generate-key
+docker compose exec app python -m app.manage garmin-login <email>
+docker compose exec app python -m app.manage garmin-status
 ```
 
 `revoke-connection` works from this side and does not depend on the client
@@ -128,6 +131,50 @@ a connector completes the OAuth handshake and then sends no traffic at all when
 the endpoint sits deeper than one path segment. For the same family of reasons
 the mount is arranged so that a bare `POST /mcp` is served directly rather than
 redirected to `/mcp/` — a method-preserving redirect there breaks the handshake.
+
+## Garmin
+
+A sidecar polls Garmin Connect on an interval and upserts into
+`diet.measurements`. Set it up once:
+
+```sh
+docker compose exec app python -m app.manage generate-key > secrets/credentials.key
+chmod 600 secrets/credentials.key
+docker compose up -d                                    # picks up the key mount
+docker compose exec app python -m app.manage garmin-login you@example.com
+docker compose run --rm poller --once --days 30         # backfill
+```
+
+`garmin-login` prompts for the Garmin password and MFA code, uses them once,
+and stores only the resulting session tokens — encrypted, with the key in
+`secrets/credentials.key` rather than in the database. **Back that file up.**
+Losing it means re-authenticating every stored session; leaking it makes the
+encrypted column pointless. `secrets/` is gitignored.
+
+```sh
+docker compose exec app python -m app.manage garmin-status    # freshness, last error
+docker compose exec app python -m app.manage garmin-forget <email>
+docker compose logs -f poller
+```
+
+The poller re-fetches a trailing window (`GARMIN_POLL_DAYS`, default 3) every
+`GARMIN_POLL_INTERVAL` seconds. The overlap is deliberate: sleep lands late and
+Garmin revises figures, and measurements upsert so re-fetching costs nothing.
+
+Because a sidecar has no exit code for anyone to read, a failed cycle makes the
+container **unhealthy** — `docker compose ps` shows it — and per-account
+failures also land in `diet.sync_state`, which drives the Garmin line on the
+status page.
+
+If a metric stops arriving, Garmin has moved a field. Raw payloads are archived
+before parsing:
+
+```sh
+docker compose run --rm poller --once --days 1     # logs the numeric keys it saw
+docker compose exec poller ls /var/log/diet/garmin/
+```
+
+Correct `DAILY_SPECS` / `SLEEP_SPECS` in [app/garmin.py](app/garmin.py) to match.
 
 ## Admin
 
@@ -156,6 +203,9 @@ app/mcp_auth.py  bearer-token verification against auth.api_tokens
 app/oauth_provider.py  the OAuth 2.1 authorization server, over Postgres
 app/oauth_routes.py    the consent screen — the one part FastMCP cannot supply
 app/main.py      routes, and the /mcp mount
+app/garmin.py    Garmin session and the defensive field mapping
+app/poller.py    the sync loop; one shot or sidecar
+app/secretbox.py credential encryption, key outside the database
 app/manage.py    admin CLI
 web/index.html   the frontend
 stub_api.py      superseded; kept only as a no-database way to serve the page

@@ -98,7 +98,8 @@ Details settled on:
   database — e.g. a file on disk / existing secret management), refreshed by
   a poller that iterates users and doesn't let one expired token abort the
   run for everyone. Track last-success per user so the frontend can show
-  per-person sync staleness, not a global figure.
+  per-person sync staleness, not a global figure. All implemented; see Garmin
+  ingest below.
 - Shared/global reference data (e.g. a future foods table) should use
   `user_id NULL` for global rows with per-user overrides, decided before rows
   exist.
@@ -134,12 +135,44 @@ code and into Postgres:
 
 ## Garmin ingest
 
-No usable free official API — Health API needs partner approval. Plan is
-`python-garminconnect` (garth-based) on a systemd timer, pulling the trailing
-2–3 days each run (sleep/body-battery land late) and upserting. Log raw JSON
-to disk before parsing (Garmin's undocumented API shifts occasionally), and
-have the poller exit non-zero loudly so an existing monitoring setup — there is
-already a Grafana/VictoriaMetrics stack to hang it off — catches it.
+No usable free official API — the Health API needs partner approval — so this
+rides the same undocumented endpoints the mobile app uses, via
+`garminconnect` 0.3.11. (That library dropped garth for `curl_cffi`, so the
+earlier "garth-based" note here was out of date.)
+
+Built, in `app/garmin.py`, `app/poller.py` and `app/secretbox.py`:
+
+- **Parsing is declarative and defensive.** `MetricSpec` lists candidate JSON
+  paths per metric; a field that has moved yields nothing rather than a guess,
+  and `describe_payload()` prints the numeric keys that did arrive so the spec
+  can be corrected. Raw payloads are archived *before* parsing, so when the
+  shape shifts the evidence is already on disk.
+- **Readings are timestamped noon local, not midnight.** Midnight UTC puts
+  every reading for a user west of Greenwich on the previous day. Verified
+  against America/Denver.
+- **Upsert on `(user_id, source, metric, external_id)`** with the date as the
+  external id, over a deliberately overlapping trailing window, because sleep
+  lands late and Garmin revises figures afterwards.
+- **A rejected reading costs only that reading**: each upsert runs in a
+  savepoint, so a value caught by `measurements_value_sane` does not take the
+  rest of the day with it.
+- **A failed account costs only that account.** Outcomes land per user in
+  `diet.sync_state`, which is what the status panel already reads.
+- **The session, not the password, is stored.** `manage.py garmin-login` uses
+  the password once, interactively, handles MFA, and keeps only the token blob,
+  Fernet-encrypted with the key in a file outside the database. A dump of
+  `diet.garmin_credentials` is therefore not a set of working sessions.
+
+It runs as a sidecar container rather than the systemd timer originally planned.
+That trade needed compensating for: a restarting container has no exit code for
+anyone to read, so each cycle writes a status file the container healthcheck
+reads, and a failed or stale cycle makes the container unhealthy.
+`docker compose run --rm poller --once --days 30` still does a one-shot backfill.
+
+**Not verified against a real Garmin account.** The parse and write path is
+covered by fixtures against real Postgres, but the field names in
+`DAILY_SPECS`/`SLEEP_SPECS` are a best reading of an undocumented API. The
+first real run is the test.
 
 ## MCP tools (surface kept intentionally small)
 
@@ -227,11 +260,10 @@ primary UI.
   connector OAuth flow failing against otherwise-correct self-hosted servers.
   Suggested to validate MCP tools first against Claude Code (accepts a static
   header) before adding OAuth into the mix.
-- The Garmin poller. The schema is ready for it: `diet.measurements` upserts
-  on `(user_id, source, metric, external_id)`, `diet.sync_state` records
-  per-user last-success (the status panel already reads it), and
-  `diet.garmin_credentials` holds ciphertext with the key outside the database.
-  No poller code exists yet, and no encryption code either.
+- **The Garmin poller works but has never talked to Garmin.** The field names
+  are the remaining unknown; see Garmin ingest. Credential key rotation is also
+  unimplemented: `secretbox` stores a `key_id` per row so a second key could be
+  introduced, but nothing re-encrypts.
 - **Claude.ai has not actually been connected yet.** The OAuth server below is
   built and exercised end to end against raw HTTP, but only against a local
   http origin. The remaining unknowns are the ones no local test can settle:

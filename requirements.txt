@@ -4,3 +4,5 @@ psycopg[binary,pool]==3.3.5
 argon2-cffi==25.1.0
 fastmcp==4.0.3
 python-multipart==0.0.32
+garminconnect==0.3.11
+cryptography==50.0.1

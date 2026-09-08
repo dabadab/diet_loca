@@ -231,6 +231,89 @@ def cmd_revoke_connection(args) -> None:
     print(f"revoked {n} token(s); the connector must go through consent again")
 
 
+def cmd_generate_key(args) -> None:
+    """Print a credentials key. It belongs in a file, not in the database."""
+    from . import secretbox
+    print(secretbox.generate_key().decode())
+    print(f"\nWrite it to {secretbox.key_path()} with mode 0600 and mount it into",
+          "the container. Losing it means every stored Garmin session must be",
+          "re-authenticated; leaking it makes the encrypted column pointless.",
+          sep="\n")
+
+
+def cmd_garmin_login(args) -> None:
+    """
+    Authenticate to Garmin once and store the resulting session, encrypted.
+
+    The Garmin password is used here and never stored -- only the session
+    tokens are, and those refresh themselves on use.
+    """
+    from . import garmin, secretbox
+
+    with _owner_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT user_id FROM auth.users WHERE email = lower(%s)", (args.email,))
+        row = cur.fetchone()
+    if row is None:
+        sys.exit(f"no such user: {args.email}")
+
+    garmin_email = args.garmin_email or input("Garmin account email: ").strip()
+    password = getpass.getpass("Garmin password: ")
+
+    def mfa_prompt() -> str:
+        return input("Garmin MFA code: ").strip()
+
+    try:
+        _, token_json = garmin.login_interactive(garmin_email, password, mfa_prompt)
+    except Exception as exc:
+        sys.exit(f"Garmin login failed: {type(exc).__name__}: {exc}")
+
+    ciphertext, key_id = secretbox.encrypt(token_json)
+    with _owner_conn() as conn, conn.cursor() as cur:
+        cur.execute("""INSERT INTO diet.garmin_credentials
+                         (user_id, secret_ciphertext, key_id)
+                       VALUES (%s, %s, %s)
+                       ON CONFLICT (user_id) DO UPDATE
+                         SET secret_ciphertext = EXCLUDED.secret_ciphertext,
+                             key_id = EXCLUDED.key_id, updated_at = now()""",
+                    (row["user_id"], ciphertext, key_id))
+        conn.commit()
+    print(f"stored an encrypted Garmin session for {args.email}")
+    print("run `python -m app.poller --user " + args.email + "` to pull data now")
+
+
+def cmd_garmin_forget(args) -> None:
+    with _owner_conn() as conn, conn.cursor() as cur:
+        cur.execute("""DELETE FROM diet.garmin_credentials WHERE user_id =
+                       (SELECT user_id FROM auth.users WHERE email = lower(%s))""",
+                    (args.email,))
+        if cur.rowcount == 0:
+            sys.exit(f"no stored Garmin session for {args.email}")
+        conn.commit()
+    print(f"forgot the Garmin session for {args.email}")
+
+
+def cmd_garmin_status(args) -> None:
+    with _owner_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT u.email, c.updated_at, c.key_id,
+                   s.last_attempt_at, s.last_success_at, s.last_error,
+                   (SELECT count(*) FROM diet.measurements m
+                     WHERE m.user_id = u.user_id AND m.source = 'garmin') AS readings
+            FROM diet.garmin_credentials c
+            JOIN auth.users u USING (user_id)
+            LEFT JOIN diet.sync_state s
+              ON s.user_id = u.user_id AND s.connector = 'garmin'
+            ORDER BY u.email""")
+        rows = cur.fetchall()
+    if not rows:
+        return print("no Garmin sessions stored")
+    for r in rows:
+        ok = r["last_success_at"].strftime("%Y-%m-%d %H:%M") if r["last_success_at"] else "never"
+        print(f"  {r['email']:26} last success {ok:16} readings {r['readings']}")
+        if r["last_error"]:
+            print(f"  {'':26} last error: {r['last_error'][:90]}")
+
+
 # (description, [(food, grams, kcal, protein_g, carb_g, fat_g)])
 _DEMO_MEALS = [
     ("porridge with milk and a banana", [
@@ -286,6 +369,22 @@ def main() -> None:
     rc.add_argument("client_id", nargs="?", default=None,
                     help="limit to one client; omit to revoke all of them")
     rc.set_defaults(fn=cmd_revoke_connection)
+
+    gk = sub.add_parser("generate-key", help="print a new credentials encryption key")
+    gk.set_defaults(fn=cmd_generate_key)
+
+    gl = sub.add_parser("garmin-login", help="store an encrypted Garmin session")
+    gl.add_argument("email", help="the diet-log account this Garmin data belongs to")
+    gl.add_argument("--garmin-email", default=None,
+                    help="the Garmin account email, if different; prompted otherwise")
+    gl.set_defaults(fn=cmd_garmin_login)
+
+    gf = sub.add_parser("garmin-forget", help="delete a stored Garmin session")
+    gf.add_argument("email")
+    gf.set_defaults(fn=cmd_garmin_forget)
+
+    gs = sub.add_parser("garmin-status", help="show stored sessions and sync freshness")
+    gs.set_defaults(fn=cmd_garmin_status)
 
     args = ap.parse_args()
     args.fn(args)

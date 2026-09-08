@@ -53,8 +53,48 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-1}
       MCP_PUBLIC_URL: ${MCP_PUBLIC_URL:-}
       TZ: ${TZ:-UTC}
+    volumes:
+      # The encryption key lives outside the database on purpose: a dump of
+      # diet.garmin_credentials is then not a set of Garmin sessions.
+      - ./secrets/credentials.key:/run/secrets/credentials.key:ro
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${APP_PORT:-8080}:8080"
 
+  # Sidecar: polls on an interval alongside the app. A one-shot run for
+  # backfills or debugging still works:
+  #   docker compose run --rm poller --days 30 --user you@example.com
+  poller:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${APP_DB_USER:-diet_app}:${APP_DB_PASSWORD:?}@db:5432/${POSTGRES_DB:-diet}
+      MIGRATION_DATABASE_URL: postgresql://${POSTGRES_USER:-diet_owner}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-diet}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+      GARMIN_POLL_DAYS: ${GARMIN_POLL_DAYS:-3}
+      GARMIN_POLL_LOOP: "1"
+      GARMIN_POLL_INTERVAL: ${GARMIN_POLL_INTERVAL:-3600}
+      GARMIN_RAW_DIR: /var/log/diet/garmin
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ./secrets/credentials.key:/run/secrets/credentials.key:ro
+      - garminraw:/var/log/diet/garmin
+    # entrypoint rather than command, so `docker compose run --rm poller --once
+    # --days 30` appends flags instead of replacing the whole command line.
+    entrypoint: ["python", "-m", "app.poller"]
+    command: []
+    # A sidecar has no exit code for anyone to read, so failure surfaces here
+    # instead: a cycle that failed, or no successful cycle in three intervals,
+    # makes the container unhealthy and visible to `docker compose ps`.
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.poller", "--healthcheck"]
+      interval: 120s
+      timeout: 10s
+      retries: 2
+      start_period: 120s
+
 volumes:
   pgdata:
+  garminraw:
