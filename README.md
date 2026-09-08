@@ -138,12 +138,19 @@ A sidecar polls Garmin Connect on an interval and upserts into
 `diet.measurements`. Set it up once:
 
 ```sh
-docker compose exec app python -m app.manage generate-key > secrets/credentials.key
+# Make the key first — before the containers start. It is a 32-byte urlsafe
+# base64 value, so nothing from this repo is needed to generate one:
+mkdir -p secrets
+openssl rand -base64 32 | tr '+/' '-_' > secrets/credentials.key
 chmod 600 secrets/credentials.key
-docker compose up -d                                    # picks up the key mount
+
+docker compose up -d
 docker compose exec app python -m app.manage garmin-login you@example.com
 docker compose run --rm poller --once --days 30         # backfill
 ```
+
+(`docker compose exec app python -m app.manage generate-key` prints one too,
+but only once the container is running — which is why the key comes first.)
 
 `garmin-login` prompts for the Garmin password and MFA code, uses them once,
 and stores only the resulting session tokens — encrypted, with the key in

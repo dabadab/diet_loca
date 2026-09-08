@@ -56,7 +56,10 @@ services:
     volumes:
       # The encryption key lives outside the database on purpose: a dump of
       # diet.garmin_credentials is then not a set of Garmin sessions.
-      - ./secrets/credentials.key:/run/secrets/credentials.key:ro
+      # The directory is mounted, not the file: Docker materialises a missing
+      # bind-mount source as a directory, and pointing that at the key path
+      # produces "Is a directory" at exactly the moment you try to create it.
+      - ./secrets:/run/secrets:ro
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${APP_PORT:-8080}:8080"
 
@@ -79,7 +82,7 @@ services:
       GARMIN_RAW_DIR: /var/log/diet/garmin
       TZ: ${TZ:-UTC}
     volumes:
-      - ./secrets/credentials.key:/run/secrets/credentials.key:ro
+      - ./secrets:/run/secrets:ro
       - garminraw:/var/log/diet/garmin
     # entrypoint rather than command, so `docker compose run --rm poller --once
     # --days 30` appends flags instead of replacing the whole command line.
