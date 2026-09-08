@@ -142,7 +142,11 @@ A sidecar polls Garmin Connect on an interval and upserts into
 # base64 value, so nothing from this repo is needed to generate one:
 mkdir -p secrets
 openssl rand -base64 32 | tr '+/' '-_' > secrets/credentials.key
-chmod 600 secrets/credentials.key
+
+# The container runs as uid 10001, not as you, so a 0600 file you own is
+# unreadable inside it. Hand the key to that uid and nobody else:
+sudo chown 10001:10001 secrets/credentials.key
+sudo chmod 400 secrets/credentials.key
 
 docker compose up -d
 docker compose exec app python -m app.manage garmin-login you@example.com
@@ -151,6 +155,10 @@ docker compose run --rm poller --once --days 30         # backfill
 
 (`docker compose exec app python -m app.manage generate-key` prints one too,
 but only once the container is running — which is why the key comes first.)
+
+`garmin-login` checks the key is readable before it prompts for anything: a
+Garmin login costs an MFA code and a slot against an IP rate limit that answers
+429 for a while afterwards, so it fails on cheap problems first.
 
 `garmin-login` prompts for the Garmin password and MFA code, uses them once,
 and stores only the resulting session tokens — encrypted, with the key in

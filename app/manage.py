@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import pathlib
 import random
 import sys
 from datetime import datetime, timedelta, timezone
@@ -250,6 +251,15 @@ def cmd_garmin_login(args) -> None:
     """
     from . import garmin, secretbox
 
+    # Check everything cheap before anything expensive. A Garmin login costs an
+    # MFA code and a slot against an IP rate limit that returns 429 for a while
+    # afterwards; discovering an unreadable key file *after* spending both is
+    # the wrong order, and was how this was first written.
+    try:
+        secretbox.check_usable()
+    except secretbox.KeyUnavailable as exc:
+        sys.exit(f"{exc}\n\nFix the key first: nothing has been sent to Garmin.")
+
     with _owner_conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT user_id FROM auth.users WHERE email = lower(%s)", (args.email,))
         row = cur.fetchone()
@@ -267,7 +277,22 @@ def cmd_garmin_login(args) -> None:
     except Exception as exc:
         sys.exit(f"Garmin login failed: {type(exc).__name__}: {exc}")
 
-    ciphertext, key_id = secretbox.encrypt(token_json)
+    try:
+        ciphertext, key_id = secretbox.encrypt(token_json)
+    except secretbox.KeyUnavailable as exc:
+        # The login worked; only storage failed. Do not make the user spend
+        # another MFA code to recover from our problem.
+        fallback = pathlib.Path(f"/tmp/garmin-session-{args.email}.json")
+        try:
+            fallback.write_text(token_json)
+            fallback.chmod(0o600)
+            hint = (f"The Garmin session is valid and was written unencrypted to "
+                    f"{fallback} inside the container. Fix the key, then re-run "
+                    f"garmin-login, and delete that file.")
+        except OSError:
+            hint = "The Garmin session was valid but could not be saved anywhere."
+        sys.exit(f"{exc}\n\n{hint}")
+
     with _owner_conn() as conn, conn.cursor() as cur:
         cur.execute("""INSERT INTO diet.garmin_credentials
                          (user_id, secret_ciphertext, key_id)

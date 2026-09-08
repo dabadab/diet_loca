@@ -48,14 +48,33 @@ def _load_key() -> bytes:
             "then recreate the container.")
     try:
         raw = p.read_bytes().strip()
+    except PermissionError as exc:
+        # The container runs as an unprivileged uid that is not the host user
+        # who created the key, so a 0600 file owned by the host user is
+        # unreadable here. This is the common first-run failure.
+        raise KeyUnavailable(
+            f"cannot read the credentials key at {p}: {exc}. The container runs "
+            f"as uid {os.getuid()}; give that uid read access on the host, e.g. "
+            "`sudo chown 10001:10001 secrets/credentials.key && chmod 400 "
+            "secrets/credentials.key`."
+        ) from exc
     except OSError as exc:
         raise KeyUnavailable(
-            f"cannot read the credentials key at {p}: {exc}. Generate one with "
-            "`python -m app.manage generate-key` and mount it into the container."
+            f"cannot read the credentials key at {p}: {exc}. Create one with "
+            "`openssl rand -base64 32 | tr '+/' '-_' > secrets/credentials.key`."
         ) from exc
     if not raw:
         raise KeyUnavailable(f"the credentials key at {p} is empty")
     return raw
+
+
+def check_usable() -> None:
+    """
+    Prove the key can be read and used. Raises KeyUnavailable if not.
+
+    Exists so an interactive flow can fail *before* spending something scarce.
+    """
+    Fernet(_load_key()).decrypt(Fernet(_load_key()).encrypt(b"probe"))
 
 
 def encrypt(plaintext: str) -> tuple[bytes, str]:
