@@ -185,6 +185,7 @@ def check_status(max_age: int) -> int:
 
 
 def run_once(settings, args, raw_root: Path | None) -> int:
+    prune_raw(raw_root, args.keep_raw_days)
     accounts = _accounts(settings, args.user)
     if not accounts:
         log.warning("no Garmin credentials stored%s; nothing to do",
@@ -223,6 +224,30 @@ def run_once(settings, args, raw_root: Path | None) -> int:
     return 0
 
 
+def prune_raw(raw_root: Path | None, keep_days: int) -> int:
+    """
+    Age out archived payloads.
+
+    They are full health records -- sleep, resting heart rate, weight -- under a
+    filename that identifies the person, and their diagnostic value is in the
+    last few days, not the last few years.
+    """
+    if raw_root is None or keep_days <= 0 or not raw_root.exists():
+        return 0
+    cutoff = time.time() - keep_days * 86400
+    removed = 0
+    for f in raw_root.rglob("*.json"):
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+                removed += 1
+        except OSError as exc:
+            log.warning("could not prune %s: %s", f, exc)
+    if removed:
+        log.info("pruned %d archived payload(s) older than %d days", removed, keep_days)
+    return removed
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -232,6 +257,9 @@ def main() -> int:
     ap.add_argument("--user", default=None, help="limit to one account by email")
     ap.add_argument("--raw-dir", default=os.environ.get("GARMIN_RAW_DIR", "/var/log/diet/garmin"),
                     help="where raw payloads are archived; empty to skip")
+    ap.add_argument("--keep-raw-days", type=int,
+                    default=int(os.environ.get("GARMIN_RAW_KEEP_DAYS", "30")),
+                    help="delete archived payloads older than this; 0 keeps everything")
     ap.add_argument("--once", action="store_true",
                     help="force a single cycle even when GARMIN_POLL_LOOP is set; "
                          "for `docker compose run` against the sidecar's own service")

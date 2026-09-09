@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import getpass
-import pathlib
 import random
 import sys
 from datetime import datetime, timedelta, timezone
@@ -294,17 +293,14 @@ def cmd_garmin_login(args) -> None:
         ciphertext, key_id = secretbox.encrypt(token_json)
     except secretbox.KeyUnavailable as exc:
         # The login worked; only storage failed. Do not make the user spend
-        # another MFA code to recover from our problem.
-        fallback = pathlib.Path(f"/tmp/garmin-session-{args.email}.json")
-        try:
-            fallback.write_text(token_json)
-            fallback.chmod(0o600)
-            hint = (f"The Garmin session is valid and was written unencrypted to "
-                    f"{fallback} inside the container. Fix the key, then re-run "
-                    f"garmin-login, and delete that file.")
-        except OSError:
-            hint = "The Garmin session was valid but could not be saved anywhere."
-        sys.exit(f"{exc}\n\n{hint}")
+        # another MFA code to recover from our problem -- but do not leave a
+        # plaintext session lying in the container filesystem either, waiting on
+        # someone to remember to delete it. Print it; the operator is right here.
+        print(f"\n{exc}\n", file=sys.stderr)
+        print("The Garmin session below is valid. Fix the key and re-run "
+              "garmin-login; nothing was written to disk.\n", file=sys.stderr)
+        print(token_json)
+        sys.exit(1)
 
     with _owner_conn() as conn, conn.cursor() as cur:
         cur.execute("""INSERT INTO diet.garmin_credentials

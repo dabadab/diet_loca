@@ -88,6 +88,7 @@ services:
       GARMIN_POLL_LOOP: "1"
       GARMIN_POLL_INTERVAL: ${GARMIN_POLL_INTERVAL:-3600}
       GARMIN_RAW_DIR: /var/log/diet/garmin
+      GARMIN_RAW_KEEP_DAYS: ${GARMIN_RAW_KEEP_DAYS:-30}
       TZ: ${TZ:-UTC}
     volumes:
       - ./secrets:/run/secrets:ro
