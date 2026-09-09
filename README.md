@@ -15,8 +15,13 @@ openssl rand -hex 32         #   POSTGRES_PASSWORD
 openssl rand -hex 32         #   APP_DB_PASSWORD
 
 docker compose up -d --build
-docker compose exec app python -m app.manage adduser you@example.com "Your Name" Europe/Budapest
+./adduser.sh you@example.com "Your Name" Europe/Budapest   # or just ./adduser.sh
 ```
+
+`adduser.sh` checks what is cheap to check before a password is typed twice:
+that the stack is up, that the address is free, and that the timezone is one
+Postgres will accept. The last matters most — every `local_date` is derived
+from it, so a typo silently misfiles every row the account ever writes.
 
 Then open `http://127.0.0.1:8080` and sign in.
 
@@ -199,6 +204,7 @@ Correct `DAILY_SPECS` / `SLEEP_SPECS` in [app/garmin.py](app/garmin.py) to match
 ## Admin
 
 ```sh
+./adduser.sh [email] [name] [timezone]                          # wraps the next line
 docker compose exec app python -m app.manage adduser <email> <name> [timezone]
 docker compose exec app python -m app.manage passwd <email>      # revokes every credential
 docker compose exec app python -m app.manage seed-demo <email>   # sample rows for the UI
@@ -228,6 +234,7 @@ app/poller.py    the sync loop; one shot or sidecar
 app/secretbox.py credential encryption, key outside the database
 app/manage.py    admin CLI
 web/index.html   the frontend
+adduser.sh       account creation, with the checks worth doing up front
 stub_api.py      superseded; kept only as a no-database way to serve the page
 ```
 
