@@ -46,10 +46,16 @@ def _read_password() -> str:
 def cmd_adduser(args) -> None:
     digest = _read_password()
     with _owner_conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            """INSERT INTO auth.users (email, display_name, timezone, password_hash)
-               VALUES (lower(%s), %s, %s, %s) RETURNING user_id""",
-            (args.email, args.display_name, args.timezone, digest))
+        try:
+            cur.execute(
+                """INSERT INTO auth.users (email, display_name, timezone, password_hash)
+                   VALUES (lower(%s), %s, %s, %s) RETURNING user_id""",
+                (args.email, args.display_name, args.timezone, digest))
+        except psycopg.errors.UniqueViolation:
+            sys.exit(f"{args.email} already has an account; use `passwd` to change it")
+        except psycopg.errors.RaiseException as exc:
+            # The auth.users trigger rejects a timezone outside pg_timezone_names.
+            sys.exit(str(exc).splitlines()[0])
         print("created", cur.fetchone()["user_id"])
         conn.commit()
 
