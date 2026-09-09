@@ -627,9 +627,18 @@ function statsBlock(st) {
 
 function renderRollup() {
   const box = el("rollupView");
-  const recorded = state.days.filter((d) => d.meals_logged > 0 || d.energy_out_kcal != null);
+  // Today is a partial day: dinner is not eaten yet and Garmin has not finished
+  // accumulating expenditure. Averaging it in drags every figure down and makes
+  // the deficit look better than it is, so summaries cover complete days only.
+  const today = state.days.length ? state.days[0].date : null;
+  const hasData = (d) => d.meals_logged > 0 || d.energy_out_kcal != null;
+  const recorded = state.days.filter((d) => d.date !== today && hasData(d));
   if (!recorded.length) {
-    box.innerHTML = `<div class="block-card"><div class="empty-note">Nothing recorded yet.</div></div>`;
+    const onlyToday = state.days.some((d) => d.date === today && hasData(d));
+    box.innerHTML = `<div class="block-card"><div class="empty-note">${
+      onlyToday
+        ? "Only today has anything recorded, and today is not counted until it is complete."
+        : "Nothing recorded yet."}</div></div>`;
     return;
   }
   const asc = [...recorded].reverse();
@@ -659,8 +668,8 @@ function renderRollup() {
 
   box.innerHTML = `
     <div class="block-card">
-      <div class="block-title"><h2>All days</h2>
-        <span class="sub">${all.n} recorded · ${all.intakeDays} with meals</span></div>
+      <div class="block-title"><h2>Complete days</h2>
+        <span class="sub">${all.n} days · ${all.intakeDays} with meals · today excluded</span></div>
       ${statsBlock(all)}
       ${all.intakeDays ? `<div class="avg-line" style="margin-top:12px">
         calorie target exceeded on ${overKcal} of ${all.intakeDays} logged days ·
