@@ -195,7 +195,7 @@ Correct `DAILY_SPECS` / `SLEEP_SPECS` in [app/garmin.py](app/garmin.py) to match
 
 ```sh
 docker compose exec app python -m app.manage adduser <email> <name> [timezone]
-docker compose exec app python -m app.manage passwd <email>      # also revokes sessions
+docker compose exec app python -m app.manage passwd <email>      # revokes every credential
 docker compose exec app python -m app.manage seed-demo <email>   # sample rows for the UI
 docker compose exec app python -m app.manage issue-token <email> [--label L] [--days N]
 docker compose exec app python -m app.manage list-tokens

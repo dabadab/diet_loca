@@ -62,12 +62,25 @@ def cmd_passwd(args) -> None:
                     (digest, args.email))
         if cur.rowcount == 0:
             sys.exit(f"no such user: {args.email}")
-        # Password change invalidates every existing cookie.
-        cur.execute("""DELETE FROM auth.sessions WHERE user_id =
-                       (SELECT user_id FROM auth.users WHERE email = lower(%s))""",
-                    (args.email,))
+        # A password is changed because it may be known to someone else, so every
+        # credential that stands in for it has to go -- not just the cookies.
+        # An MCP bearer token or an OAuth refresh token left alive still reaches
+        # log_meal and query_sql for the same account.
+        cur.execute("""SELECT user_id FROM auth.users WHERE email = lower(%s)""", (args.email,))
+        uid = cur.fetchone()["user_id"]
+        cur.execute("DELETE FROM auth.sessions WHERE user_id = %s", (uid,))
+        sessions = cur.rowcount
+        cur.execute("""UPDATE auth.api_tokens SET revoked_at = now()
+                       WHERE user_id = %s AND revoked_at IS NULL""", (uid,))
+        tokens = cur.rowcount
+        cur.execute("""UPDATE auth.oauth_tokens SET revoked_at = now()
+                       WHERE user_id = %s AND revoked_at IS NULL""", (uid,))
+        oauth = cur.rowcount
         conn.commit()
-        print("password changed; existing sessions revoked")
+    print(f"password changed; revoked {sessions} session(s), {tokens} API token(s), "
+          f"{oauth} OAuth token(s)")
+    if oauth:
+        print("connected Claude clients must go through consent again")
 
 
 def cmd_seed_demo(args) -> None:
