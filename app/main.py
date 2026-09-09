@@ -95,14 +95,17 @@ async def headers(request: Request, call_next):
     # MCP responses are streamed and are not browser documents: a CSP header is
     # meaningless on them, and turning a mid-stream error into a JSON body would
     # corrupt the transport. Let them through untouched.
-    if request.url.path.startswith(settings.mcp_path):
+    path = request.url.path
+    if path == settings.mcp_path or path.startswith(settings.mcp_path + "/"):
         return await call_next(request)
     try:
         response = await call_next(request)
-    except psycopg.Error as exc:           # pool exhausted, database gone, ...
+    except psycopg.Error:                  # pool exhausted, database gone, ...
+        # The detail goes to the log, not to the caller: psycopg's message names
+        # the container host, its IP, the port and the role, and this path needs
+        # no session to reach.
         log.exception("database error on %s", request.url.path)
-        response = JSONResponse({"error": "database_unavailable",
-                                 "detail": str(exc).splitlines()[0]}, status_code=503)
+        response = JSONResponse({"error": "database_unavailable"}, status_code=503)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy", "same-origin")
     response.headers.setdefault(
@@ -110,7 +113,7 @@ async def headers(request: Request, call_next):
         "default-src 'self'; script-src 'self' 'unsafe-inline'; "
         "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
         "form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
-    if request.url.path.startswith("/api/"):
+    if path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -162,9 +165,11 @@ def health():
     """Unauthenticated, for the container healthcheck and for nginx."""
     try:
         ms = db.ping()
-    except Exception as exc:
-        return JSONResponse({"status": "degraded", "database": str(exc).splitlines()[0]},
-                            status_code=503)
+    except Exception:
+        # Unauthenticated, and the container healthcheck only reads the status
+        # code, so there is nothing to gain from describing the failure here.
+        log.exception("health check failed")
+        return JSONResponse({"status": "degraded"}, status_code=503)
     return {"status": "ok", "database_ms": round(ms, 1),
             "uptime_s": round(time.time() - STARTED_AT)}
 

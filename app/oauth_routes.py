@@ -124,7 +124,10 @@ def _page(title: str, body: str, status: int = 200,
         f"<style>{_STYLE}</style></head>"
         f"<body><div class=card>{body}</div></body></html>", status_code=status,
         # Set explicitly so the middleware's setdefault leaves it alone.
-        headers={"Content-Security-Policy": _csp(redirect_uri)})
+        headers={"Content-Security-Policy": _csp(redirect_uri),
+                 # This page prints the account's name and email and the client
+                 # asking for access; it must not sit in a shared cache.
+                 "Cache-Control": "no-store"})
 
 
 def _problem(message: str, status: int = 400) -> HTMLResponse:

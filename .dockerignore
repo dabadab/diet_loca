@@ -1,6 +1,7 @@
 .venv/
 .git/
 .env
+secrets/
 __pycache__/
 *.pyc
 *.md
