@@ -342,5 +342,10 @@ primary UI.
 - Login is single-factor with an in-process rate limiter. That limiter is
   per-container, so it stops counting correctly the moment there is more than
   one app replica.
-- The in-process login throttle is also what guards `/authorize`, so the same
-  single-replica caveat applies to the OAuth entry point.
+- **`/register` and `/authorize` have no rate limit.** They are unauthenticated
+  by necessity — Claude.ai needs dynamic client registration — and the login
+  throttle does not reach them; it is wired only to `POST /api/login`. Abandoned
+  client rows are now aged out, so the growth is bounded, but the endpoints
+  themselves are open. A limiter here would have to not block Claude, whose
+  egress is a shared range, so an nginx `limit_req` zone tuned generously is a
+  better fit than the in-process throttle.

@@ -85,9 +85,19 @@ def _sql_register_client(client_id: str, info: dict, name: str | None) -> None:
                      client_name = EXCLUDED.client_name""",
             (client_id, Json(info), name))
         # Claude registers a fresh client on every new connection, so without
-        # this the table grows without bound.
-        cur.execute("""DELETE FROM auth.oauth_clients
-                       WHERE last_seen_at IS NULL AND created_at < now() - interval '30 days'""")
+        # this the table grows without bound. Pruning only on last_seen_at IS
+        # NULL missed the common case: a client that connected once and was then
+        # abandoned keeps its stamp for ever. Age it out instead, but never
+        # touch one still holding a usable token -- that would silently force a
+        # working connector back through consent.
+        cur.execute("""
+            DELETE FROM auth.oauth_clients c
+             WHERE coalesce(c.last_seen_at, c.created_at) < now() - interval '30 days'
+               AND NOT EXISTS (
+                     SELECT 1 FROM auth.oauth_tokens t
+                      WHERE t.client_id = c.client_id
+                        AND t.revoked_at IS NULL
+                        AND (t.expires_at IS NULL OR t.expires_at > now()))""")
 
 
 def _sql_put_pending(pending_id: str, client_id: str, params: dict) -> None:
