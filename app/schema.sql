@@ -522,7 +522,13 @@ GRANT USAGE ON SCHEMA auth TO diet_app;          -- for the functions only
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA diet TO diet_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA diet TO diet_app;
-GRANT SELECT ON ALL TABLES IN SCHEMA diet TO diet_ro;
+-- diet_ro backs the model-facing query_sql tool, so its grants are the tool's
+-- real contract and are listed one table at a time. A blanket grant on the
+-- schema also handed it diet.garmin_credentials, which the tool's own docstring
+-- never claimed and no query through it should reach.
+GRANT SELECT ON diet.meals, diet.meal_items, diet.measurements, diet.sync_state
+  TO diet_ro;
+REVOKE ALL ON diet.garmin_credentials FROM diet_ro;
 
 -- The app role gets no table privileges in auth at all: identity is reachable
 -- only through the definer functions. The read-only role cannot even see the
@@ -555,5 +561,7 @@ GRANT EXECUTE ON FUNCTION diet.current_user_id() TO diet_app, diet_ro;
 -- Tables added by a later migration inherit the same shape.
 ALTER DEFAULT PRIVILEGES IN SCHEMA diet
   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO diet_app;
+-- Deliberately no ALTER DEFAULT PRIVILEGES for diet_ro: a table added later
+-- should be opt-in for the tool a model drives, not inherited silently.
 ALTER DEFAULT PRIVILEGES IN SCHEMA diet
-  GRANT SELECT ON TABLES TO diet_ro;
+  REVOKE SELECT ON TABLES FROM diet_ro;
