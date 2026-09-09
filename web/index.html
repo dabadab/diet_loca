@@ -240,7 +240,30 @@
     font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.76rem;
     color: var(--ink-soft); display: block; margin-top: 2px;
   }
-  .chain .lat { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.74rem; color: var(--ink-soft); }
+  /* Bordered cells rather than a gap-coloured grid: an incomplete last row
+     otherwise leaves a filled block where a cell would have been. */
+  .facts {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+    gap: 8px; margin-top: 14px;
+  }
+  .fact {
+    background: var(--paper); border: 1px solid var(--paper-line);
+    border-radius: 3px; padding: 8px 11px;
+  }
+  .fact-label {
+    display: block; font-family: 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 0.66rem; letter-spacing: .06em; color: var(--ink-soft); margin-bottom: 2px;
+  }
+  .fact-value {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.86rem; font-weight: 600;
+  }
+  .fact-value.bad { color: var(--tomato); }
+  .action {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.76rem;
+    background: var(--paper); border: 1px dashed var(--ink-soft); border-radius: 4px;
+    padding: 8px 11px; margin-top: 10px; color: var(--ink-soft); overflow-wrap: anywhere;
+  }
+  .action.bad { border-color: var(--tomato); color: var(--tomato); }
 
   /* sign in */
   form.login { display: grid; gap: 0.7rem; max-width: 21rem; }
@@ -685,34 +708,112 @@ async function renderSystem() {
   const box = el("systemView");
   box.innerHTML = `<div class="block-card"><div class="empty-note">Checking…</div></div>`;
   const t0 = performance.now();
+  let data;
   try {
-    const data = await api("/api/status");
-    box.innerHTML = `
-      <div class="block-card">
-        <div class="block-title">
-          <h2>Where the data comes from</h2>
-          <span class="sub">round trip ${Math.round(performance.now() - t0)} ms</span>
-        </div>
-        <ul class="chain">
-          ${data.stages.map((s) => `
-            <li>
-              <span>
-                <span class="stage-name">${esc(s.stage)}</span>
-                <span class="stage-detail">${esc(s.detail)}</span>
-              </span>
-              <span style="text-align:right;white-space:nowrap">
-                <span class="status-pill ${esc(s.state)}">${esc(s.state)}</span>
-                ${s.ms == null ? "" : `<div class="lat">${s.ms} ms</div>`}
-              </span>
-            </li>`).join("")}
-        </ul>
-      </div>`;
+    data = await api("/api/status");
   } catch (err) {
     box.innerHTML = `<div class="block-card">
       <div class="block-title"><h2>The API did not answer</h2></div>
       <div class="empty-note">${esc(err.message)}. The page is being served, so check that
       the app container is running and that nginx proxies to it.</div></div>`;
+    return;
   }
+
+  const chain = `
+    <div class="block-card">
+      <div class="block-title">
+        <h2>Where the data comes from</h2>
+        <span class="sub">round trip ${Math.round(performance.now() - t0)} ms</span>
+      </div>
+      <ul class="chain">
+        ${data.stages.map((s) => `
+          <li>
+            <span>
+              <span class="stage-name">${esc(s.stage)}</span>
+              <span class="stage-detail">${esc(s.detail)}</span>
+            </span>
+            <span class="status-pill ${esc(s.state)}">${esc(s.state)}</span>
+          </li>`).join("")}
+      </ul>
+    </div>`;
+
+  box.innerHTML = chain + garminCard(data.diagnostics);
+}
+
+// The three ways a Garmin sync fails are indistinguishable from the outside --
+// no stored session, a poller that never runs, a poller that runs and fails --
+// and a fourth looks like success while nothing new arrives. This names which.
+function garminCard(diag) {
+  if (!diag || !diag.garmin) {
+    return `<div class="block-card">
+      <div class="block-title"><h2>Garmin</h2></div>
+      <div class="empty-note">Diagnostics unavailable — the database did not answer.</div>
+    </div>`;
+  }
+  const g = diag.garmin, v = diag.garmin_verdict;
+
+  const fact = (label, value, cls) =>
+    `<div class="fact"><span class="fact-label">${label}</span>
+       <span class="fact-value ${cls || ""}">${value}</span></div>`;
+
+  const rows = g.metrics.length ? `
+    <div class="table-wrap" style="margin-top:14px">
+      <table class="days">
+        <thead><tr><th>Metric</th><th>Last seen</th><th>Latest</th><th>Readings</th></tr></thead>
+        <tbody>${g.metrics.map((m) => `
+          <tr><td class="date" style="padding-left:0">${esc(m.metric)}</td>
+              <td>${esc(m.last_seen)}</td>
+              <td>${m.latest == null ? "—" : `${n1(m.latest)} ${esc(m.unit || "")}`}</td>
+              <td>${m.n}</td></tr>`).join("")}
+        </tbody>
+      </table>
+    </div>` : '<div class="empty-note">No Garmin readings stored at all.</div>';
+
+  return `
+    <div class="block-card">
+      <div class="block-title">
+        <h2>Garmin</h2>
+        <span class="status-pill ${esc(v.state)}">${esc(v.state)}</span>
+      </div>
+      <p style="margin:0 0 4px">${esc(v.summary)}</p>
+      ${v.action ? `<div class="action">${esc(v.action)}</div>` : ""}
+
+      <div class="facts">
+        ${fact("session stored", g.credential
+            ? `yes · ${esc(g.credential.stored_at.slice(0, 10))}`
+            : "no", g.credential ? "" : "bad")}
+        ${fact("last attempt", g.last_attempt_at ? esc(ago(g.last_attempt_at)) : "never",
+               g.last_attempt_at ? "" : "bad")}
+        ${fact("last success", g.last_success_at ? esc(ago(g.last_success_at)) : "never",
+               g.last_success_at ? "" : "bad")}
+        ${fact("newest reading", g.newest_reading ? esc(g.newest_reading) : "—")}
+        ${fact("readings, 7 days", g.readings_last_7_days,
+               g.readings_last_7_days ? "" : "bad")}
+        ${fact("readings, total", g.readings_total)}
+      </div>
+
+      ${g.last_error ? `<div class="action bad" style="margin-top:12px">
+        last error: ${esc(g.last_error)}</div>` : ""}
+
+      ${rows}
+
+      ${g.metrics_never_seen.length ? `<div class="avg-line" style="margin-top:10px">
+        never seen: ${g.metrics_never_seen.map(esc).join(", ")} —
+        body_fat_pct needs a scale that measures impedance, so its absence is normal;
+        anything else missing suggests the field moved and
+        <code>DAILY_SPECS</code> in app/garmin.py needs correcting.</div>` : ""}
+    </div>`;
+}
+
+function ago(iso) {
+  const secs = (Date.now() - new Date(iso).getTime()) / 1000;
+  for (const [unit, size] of [["day", 86400], ["hour", 3600], ["minute", 60]]) {
+    if (secs >= size) {
+      const n = Math.floor(secs / size);
+      return `${n} ${unit}${n === 1 ? "" : "s"} ago`;
+    }
+  }
+  return "just now";
 }
 
 // --- sign in ---------------------------------------------------------------

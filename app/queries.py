@@ -170,3 +170,55 @@ def range_metrics(cur, from_date, to_date, metrics: list[str] | None = None) -> 
         ORDER BY local_date, metric
     """, {"a": from_date, "b": to_date, "m": wanted})
     return [{**dict(r), "local_date": r["local_date"].isoformat()} for r in cur.fetchall()]
+
+
+def garmin_diagnostics(cur, timezone: str) -> dict:
+    """
+    Everything needed to answer "why is no Garmin data arriving".
+
+    The three failure points are distinct and need distinguishing: no stored
+    session, a poller that is not running, and a poller that runs and fails.
+    A fourth looks like success -- syncing fine, but Garmin has nothing recent.
+    """
+    cur.execute("SELECT updated_at, key_id FROM diet.garmin_credentials")
+    cred = cur.fetchone()
+
+    cur.execute("""SELECT last_attempt_at, last_success_at, last_error
+                   FROM diet.sync_state WHERE connector = 'garmin'""")
+    sync = cur.fetchone()
+
+    cur.execute("""
+        SELECT max(local_date)                                          AS newest,
+               count(*)                                                 AS total,
+               count(*) FILTER (WHERE local_date
+                     > (now() AT TIME ZONE %(tz)s::text)::date - 7)     AS last_7_days
+        FROM diet.measurements WHERE source = 'garmin'
+    """, {"tz": timezone})
+    counts = dict(cur.fetchone())
+
+    cur.execute("""
+        SELECT metric,
+               max(local_date)                                          AS last_seen,
+               count(*)                                                 AS n,
+               (array_agg(value ORDER BY local_date DESC, ts_utc DESC))[1] AS latest,
+               (array_agg(unit  ORDER BY local_date DESC, ts_utc DESC))[1] AS unit
+        FROM diet.measurements WHERE source = 'garmin'
+        GROUP BY metric ORDER BY metric
+    """)
+    metrics = [{**dict(r), "last_seen": r["last_seen"].isoformat()} for r in cur.fetchall()]
+    seen = {m["metric"] for m in metrics}
+
+    return {
+        "credential": None if cred is None else {
+            "stored_at": cred["updated_at"].isoformat(), "key_id": cred["key_id"]},
+        "last_attempt_at": sync["last_attempt_at"].isoformat() if sync and sync["last_attempt_at"] else None,
+        "last_success_at": sync["last_success_at"].isoformat() if sync and sync["last_success_at"] else None,
+        "last_error": sync["last_error"] if sync else None,
+        "newest_reading": counts["newest"].isoformat() if counts["newest"] else None,
+        "readings_total": counts["total"],
+        "readings_last_7_days": counts["last_7_days"],
+        "metrics": metrics,
+        # Reported rather than treated as a fault: body_fat_pct needs a scale
+        # that measures impedance, so its absence is normal for most people.
+        "metrics_never_seen": [m for m in KNOWN_METRICS if m not in seen],
+    }

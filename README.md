@@ -204,6 +204,13 @@ container **unhealthy** — `docker compose ps` shows it — and per-account
 failures also land in `diet.sync_state`, which drives the Garmin line on the
 status page.
 
+**The System tab is the first place to look when nothing arrives.** It names
+which of the four failure points you are at — no stored session, a poller that
+never runs, a poller that runs and fails, or syncs that succeed while Garmin
+returns nothing new — and gives the command for that case. Underneath it lists
+every metric with when it was last seen, so a field that has moved shows up as
+one row falling behind the others.
+
 If a metric stops arriving, Garmin has moved a field. Raw payloads are archived
 before parsing:
 

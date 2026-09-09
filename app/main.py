@@ -152,6 +152,68 @@ def _ago(then: datetime | None) -> str:
     return "just now"
 
 
+def _garmin_verdict(d: dict, stale_after_h: int) -> dict:
+    """
+    Turn the diagnostic facts into the one sentence worth acting on.
+
+    Ordered by where the chain breaks first, because a later symptom is
+    meaningless while an earlier one holds -- there is no point reporting stale
+    readings when no session is stored.
+    """
+    now = datetime.now(dt_timezone.utc)
+
+    def age_h(iso: str | None) -> float | None:
+        return None if iso is None else (now - datetime.fromisoformat(iso)).total_seconds() / 3600
+
+    if d["credential"] is None:
+        return {"state": "down", "summary": "No Garmin account is connected.",
+                "action": "./adduser.sh --garmin <your email>"}
+
+    if d["last_attempt_at"] is None:
+        return {"state": "down",
+                "summary": "A session is stored, but the poller has never tried to use it.",
+                "action": "docker compose ps poller  ·  docker compose logs poller"}
+
+    attempt_h, success_h = age_h(d["last_attempt_at"]), age_h(d["last_success_at"])
+    failing = d["last_error"] and (success_h is None or attempt_h < success_h)
+    if failing:
+        return {"state": "down", "summary": f"The last sync attempt failed: {d['last_error'][:160]}",
+                "action": "A 429 means Garmin rate-limited the IP; wait before retrying. "
+                          "An auth error means the session expired: ./adduser.sh --garmin <email>"}
+
+    if success_h is None:
+        return {"state": "down", "summary": "The poller has run but has never succeeded.",
+                "action": "docker compose logs poller"}
+
+    if attempt_h > 3:
+        return {"state": "stale",
+                "summary": f"The poller last tried {_ago(datetime.fromisoformat(d['last_attempt_at']))}; "
+                           "it should run hourly.",
+                "action": "docker compose ps poller  ·  docker compose logs poller"}
+
+    if success_h > stale_after_h:
+        return {"state": "stale", "summary": "Syncing is running but has not succeeded recently.",
+                "action": "docker compose logs poller"}
+
+    if d["newest_reading"] is None:
+        return {"state": "stale",
+                "summary": "Syncs are succeeding but no readings have ever been stored.",
+                "action": "Garmin returned nothing for the polled days, or the field names moved: "
+                          "docker compose run --rm poller --once --days 1"}
+
+    newest_age = (now.date() - date_cls.fromisoformat(d["newest_reading"])).days
+    if newest_age > 2:
+        return {"state": "stale",
+                "summary": f"Syncs succeed, but the newest reading is {newest_age} days old.",
+                "action": "Garmin has no recent data -- check the watch has synced to Garmin "
+                          "Connect itself -- or the field names moved."}
+
+    return {"state": "ok",
+            "summary": f"Last sync {_ago(datetime.fromisoformat(d['last_success_at']))}; "
+                       f"newest reading {d['newest_reading']}.",
+            "action": None}
+
+
 def _uptime() -> str:
     secs = int(time.time() - STARTED_AT)
     if secs < 60:
@@ -272,6 +334,7 @@ def status(user: auth.User = Depends(current_user)):
             cur.execute("SHOW server_version")
             version = cur.fetchone()["server_version"].split()[0]
             snap = queries.sync_snapshot(cur)
+            garmin_diag = queries.garmin_diagnostics(cur, user.timezone)
     except psycopg.Error as exc:
         stages.append({"stage": "Database", "state": "down",
                        "detail": str(exc).splitlines()[0][:120], "ms": None})
@@ -279,14 +342,14 @@ def status(user: auth.User = Depends(current_user)):
                        "detail": "unknown, database unreachable", "ms": None})
         stages.append({"stage": "Claude connector", "state": "down",
                        "detail": "unknown, database unreachable", "ms": None})
-        return {"checked_at": time.time(), "stages": stages}
+        return {"checked_at": time.time(), "stages": stages, "diagnostics": None}
 
     counts = snap["counts"]
     stages.append({
         "stage": "Database", "state": "ok",
         "detail": (f"postgres {version} — {counts['meals']} meals, "
-                   f"{counts['measurements']} measurements"),
-        "ms": round(db_ms, 1)})
+                   f"{counts['measurements']} measurements · {round(db_ms, 1)} ms round trip"),
+        "ms": None})
 
     garmin = snap["connectors"].get("garmin")
     if garmin is None:
@@ -327,7 +390,14 @@ def status(user: auth.User = Depends(current_user)):
                 "detail": f"{where}; last tool call {_ago(mcp_state['last_success_at'])}",
                 "ms": None})
 
-    return {"checked_at": time.time(), "stages": stages}
+    return {
+        "checked_at": time.time(),
+        "stages": stages,
+        "diagnostics": {
+            "garmin": garmin_diag,
+            "garmin_verdict": _garmin_verdict(garmin_diag, settings.garmin_stale_after_hours),
+        },
+    }
 
 
 # Self-hosted fonts and any other page assets. Mounted before the MCP catch-all.
