@@ -102,11 +102,20 @@ def _sql_put_pending(pending_id: str, client_id: str, params: dict) -> None:
 def _sql_get_pending(pending_id: str) -> dict | None:
     with db.auth_tx() as cur:
         cur.execute(
-            """SELECT p.pending_id, p.client_id, p.params, c.client_name, c.client_info
+            """SELECT p.pending_id, p.client_id, p.params, p.session_hash,
+                      c.client_name, c.client_info
                FROM auth.oauth_pending p
                JOIN auth.oauth_clients c USING (client_id)
                WHERE p.pending_id = %s AND p.expires_at > now()""", (pending_id,))
         return cur.fetchone()
+
+
+def _sql_bind_pending(pending_id: str, session_hash: bytes) -> None:
+    """Record which session was shown the screen; first one to look wins."""
+    with db.auth_tx() as cur:
+        cur.execute("""UPDATE auth.oauth_pending SET session_hash = %s
+                       WHERE pending_id = %s AND session_hash IS NULL""",
+                    (session_hash, pending_id))
 
 
 def _sql_drop_pending(pending_id: str) -> None:
@@ -201,17 +210,29 @@ async def pending_request(pending_id: str) -> dict | None:
         "client_name": row["client_name"] or info.get("client_name") or row["client_id"],
         "client_uri": info.get("client_uri"),
         "scopes": row["params"].get("scopes") or [],
+        "session_hash": row["session_hash"],
         "redirect_uri": row["params"].get("redirect_uri"),
         "params": row["params"],
     }
 
 
-async def approve(pending_id: str, user_id: str) -> str:
+async def bind_to_session(pending_id: str, session_hash: bytes) -> None:
+    await _off(_sql_bind_pending, pending_id, session_hash)
+
+
+async def approve(pending_id: str, user_id: str, session_hash: bytes) -> str:
     """Mint the authorization code and return where to send the browser."""
     row = await _off(_sql_get_pending, pending_id)
     if row is None:
         raise AuthorizeError(error="invalid_request",
                              error_description="this approval expired; start again")
+    # The approval has to come from the session that was shown the screen. This
+    # is the CSRF token and the confused-deputy check in one, and it does not
+    # depend on the cookie's SameSite attribute holding.
+    if row["session_hash"] is None or bytes(row["session_hash"]) != session_hash:
+        raise AuthorizeError(
+            error="access_denied",
+            error_description="this approval belongs to a different sign-in; start again")
     params = row["params"]
     code = f"dc_{secrets.token_urlsafe(32)}"
     await _off(_sql_put_code, token_digest(code), row["client_id"], user_id,

@@ -189,9 +189,14 @@ CREATE TABLE IF NOT EXISTS auth.oauth_pending (
   pending_id text PRIMARY KEY,        -- opaque handle carried through consent
   client_id  text NOT NULL REFERENCES auth.oauth_clients(client_id) ON DELETE CASCADE,
   params     jsonb NOT NULL,          -- the AuthorizationParams being approved
+  -- The session that was shown the consent screen. Approval must come from the
+  -- same one, so the grant cannot be driven by a request the user did not make
+  -- and cannot approve a flow somebody else started.
+  session_hash bytea,
   created_at timestamptz NOT NULL DEFAULT now(),
   expires_at timestamptz NOT NULL
 );
+ALTER TABLE auth.oauth_pending ADD COLUMN IF NOT EXISTS session_hash bytea;
 
 CREATE TABLE IF NOT EXISTS auth.oauth_codes (
   code_hash   bytea PRIMARY KEY,      -- sha256; the code itself is never stored

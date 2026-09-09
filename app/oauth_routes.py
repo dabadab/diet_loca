@@ -178,6 +178,11 @@ async def consent_page(request: Request, pending: str = ""):
     if user is None:
         return _login_form(pending, req["client_name"])
 
+    # Bind this pending request to the viewing session before rendering, so the
+    # POST can require the same one back.
+    await oauth_provider.bind_to_session(
+        pending, auth.token_digest(request.cookies.get(settings.cookie_name, "")))
+
     scopes = req["scopes"] or []
     scope_list = ("<ul>" + "".join(f"<li>{html.escape(s)}</li>" for s in scopes) + "</ul>"
                   if scopes else "")
@@ -204,8 +209,9 @@ async def consent_submit(request: Request, pending: str = Form(...),
     user = auth.resolve(request.cookies.get(settings.cookie_name))
     if user is None:
         return _problem("Your session expired before you decided. Start again.", 401)
+    session_hash = auth.token_digest(request.cookies.get(settings.cookie_name, ""))
     try:
-        target = (await oauth_provider.approve(pending, user.user_id)
+        target = (await oauth_provider.approve(pending, user.user_id, session_hash)
                   if decision == "allow" else await oauth_provider.deny(pending))
     except AuthorizeError as exc:
         return _problem(exc.error_description or exc.error)
