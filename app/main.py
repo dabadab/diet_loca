@@ -126,8 +126,19 @@ def current_user(request: Request) -> auth.User:
 
 
 def _client_key(request: Request) -> str:
-    fwd = request.headers.get("x-forwarded-for", "")
-    return (fwd.split(",")[0].strip() or (request.client.host if request.client else "?"))
+    """
+    Who to count a failed login against.
+
+    When a proxy is declared, the *rightmost* X-Forwarded-For entry is the one
+    that proxy appended -- correct whether it replaces the header or appends to
+    it, and the one entry a client cannot forge. The leftmost is entirely
+    caller-supplied, which is what made this limit skippable.
+    """
+    if settings.trust_proxy:
+        parts = [p.strip() for p in request.headers.get("x-forwarded-for", "").split(",") if p.strip()]
+        if parts:
+            return parts[-1]
+    return request.client.host if request.client else "?"
 
 
 def _ago(then: datetime | None) -> str:
@@ -182,15 +193,21 @@ class Credentials(BaseModel):
 @app.post("/api/login")
 def login(body: Credentials, request: Request, response: Response):
     key = _client_key(request)
-    if auth.login_throttle.blocked(key):
+    # Two buckets: one per source address, one per account. The second is not
+    # something a caller can rotate, so a distributed attempt against a single
+    # account is still bounded however the address is presented.
+    email_key = (body.email or "").strip().lower()
+    if auth.login_throttle.blocked(key) or auth.account_throttle.blocked(email_key):
         raise HTTPException(429, "too_many_attempts")
 
     user = auth.authenticate(body.email, body.password)
     if user is None:
         auth.login_throttle.record_failure(key)
+        auth.account_throttle.record_failure(email_key)
         raise HTTPException(401, "invalid_credentials")
 
     auth.login_throttle.clear(key)
+    auth.account_throttle.clear(email_key)
     raw, expires_at = auth.start_session(
         user, settings.session_ttl_hours, request.headers.get("user-agent"))
     response.set_cookie(

@@ -65,6 +65,11 @@ Do not put CDN bot-protection in front of `/mcp`. Anthropic's egress range is
 the authenticated POSTs produces a failure that is invisible in origin logs.
 
 `X-Forwarded-For` matters: it is what the login rate limiter counts against.
+Set `TRUST_PROXY=1` and `FORWARDED_ALLOW_IPS=<the address nginx connects from>`
+in `.env` so the header is believed from that proxy and nowhere else — the
+limiter reads the rightmost entry, which is the one nginx wrote. Left at the
+defaults the header is ignored entirely and the limiter counts the peer
+address, which is safe but lumps every client behind the proxy together.
 
 ## Endpoints
 

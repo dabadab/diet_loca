@@ -30,6 +30,7 @@ class Settings:
     readonly_db_password: str
     session_ttl_hours: int
     cookie_secure: bool
+    trust_proxy: bool
     cookie_name: str
     web_dir: Path
     mcp_public_url: str
@@ -80,6 +81,10 @@ def load() -> Settings:
         # Default on: the failure mode of a cookie sent in the clear is worse
         # than the failure mode of a login that does not work over http.
         cookie_secure=_flag("COOKIE_SECURE", True),
+        # Whether X-Forwarded-For may be believed at all. Off by default: the
+        # login throttle is keyed on the result, so believing it unconditionally
+        # hands every caller an unlimited supply of fresh buckets.
+        trust_proxy=_flag("TRUST_PROXY", False),
         cookie_name=os.environ.get("COOKIE_NAME", "diet_session"),
         web_dir=Path(os.environ.get("WEB_DIR", _HERE.parent / "web")),
         mcp_public_url=public_url,

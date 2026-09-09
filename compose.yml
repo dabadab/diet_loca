@@ -51,6 +51,11 @@ services:
       SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-720}
       # Leave at 1 behind TLS. Set to 0 only to test over plain http.
       COOKIE_SECURE: ${COOKIE_SECURE:-1}
+      # Set both when a reverse proxy sits in front: the first tells uvicorn
+      # whose X-Forwarded-* to believe, the second lets the login throttle read
+      # the client address out of it.
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
+      TRUST_PROXY: ${TRUST_PROXY:-0}
       MCP_PUBLIC_URL: ${MCP_PUBLIC_URL:-}
       TZ: ${TZ:-UTC}
     volumes:

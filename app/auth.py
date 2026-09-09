@@ -86,6 +86,10 @@ class Throttle:
 
 
 login_throttle = Throttle()
+# Keyed on the account being attacked rather than on where the attempt claims
+# to come from. Slightly more generous, since a real user fat-fingering their
+# own password should not lock themselves out as fast as an attacker is stopped.
+account_throttle = Throttle(limit=15, window=900.0)
 
 
 def authenticate(email: str, password: str) -> User | None:
