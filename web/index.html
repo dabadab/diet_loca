@@ -32,7 +32,9 @@
   /* Wide enough for the day list beside the day itself; the other views keep a
      reading width so they are not stretched across a desktop monitor. */
   .wrap { max-width: 1160px; margin: 0 auto; }
-  #rollupView, #systemView, #gate { max-width: 760px; margin: 0 auto; }
+  /* A reading width, but starting at the left edge like the day view --
+     centring these made the three tabs sit in different places. */
+  #rollupView, #systemView, #gate { max-width: 760px; margin: 0; }
   header, .mode-tabs, .foot-note { max-width: 1160px; }
 
   /* Master-detail when there is room, stacked when there is not. */
@@ -284,7 +286,7 @@
          font-family: 'IBM Plex Mono', ui-monospace, monospace; }
 
   .foot-note {
-    text-align: center; font-size: 0.74rem; color: var(--ink-soft); margin-top: 26px;
+    font-size: 0.74rem; color: var(--ink-soft); margin-top: 26px;
     font-family: 'IBM Plex Mono', ui-monospace, monospace;
   }
 
