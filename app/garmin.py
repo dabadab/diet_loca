@@ -108,6 +108,20 @@ def extract(daily: dict | None, sleep: dict | None) -> list[Reading]:
     return out
 
 
+# A day Garmin has not populated yet comes back as a skeleton -- in practice
+# four numeric fields (userProfileId, netRemainingKilocalories, from, until).
+# A populated day carries around forty. The test is the *shape*, not the field
+# names, so it still holds if Garmin renames things: a populated day whose
+# fields moved keeps its many keys and is still reported as a problem.
+EMPTY_DAY_MAX_NUMERIC_KEYS = 8
+
+
+def looks_empty(daily: dict | None, sleep: dict | None) -> bool:
+    """True when Garmin simply has nothing for the day yet."""
+    keys = describe_payload(daily or {}) + describe_payload(sleep or {})
+    return len(keys) <= EMPTY_DAY_MAX_NUMERIC_KEYS
+
+
 def describe_payload(payload: Any, prefix: str = "", depth: int = 2) -> list[str]:
     """
     Flat list of the numeric-looking keys in a payload.

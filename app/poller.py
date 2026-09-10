@@ -140,10 +140,15 @@ def poll_user(settings, account: dict, days: int, raw_root: Path | None) -> tupl
         daily, sleep = garmin.fetch_day(api, day, raw_dir)
         readings = garmin.extract(daily, sleep)
         if not readings and (daily or sleep):
-            # Data arrived but nothing matched: the shape has probably moved.
-            log.warning("garmin: %s %s produced no readings; numeric keys seen: %s",
-                        account["email"], day,
-                        ", ".join(garmin.describe_payload(daily or {})[:12]) or "none")
+            if garmin.looks_empty(daily, sleep):
+                # Ordinary and expected: today, before Garmin has anything for
+                # it. Not worth a warning once an hour until the day fills in.
+                log.info("garmin: %s has no data for %s yet", account["email"], day)
+            else:
+                # A populated day that matched nothing: the shape has moved.
+                log.warning("garmin: %s %s produced no readings; numeric keys seen: %s",
+                            account["email"], day,
+                            ", ".join(garmin.describe_payload(daily or {})[:12]) or "none")
         n, bad = _write_readings(user_id, tz, day, readings)
         total += n
         rejected.extend(f"{day}: {b}" for b in bad)

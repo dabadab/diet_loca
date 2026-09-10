@@ -335,10 +335,19 @@ def cmd_garmin_forget(args) -> None:
 def cmd_garmin_status(args) -> None:
     with _owner_conn() as conn, conn.cursor() as cur:
         cur.execute("""
-            SELECT u.email, c.updated_at, c.key_id,
-                   s.last_attempt_at, s.last_success_at, s.last_error,
+            SELECT u.email, u.timezone, c.key_id,
+                   -- In the account's own timezone. Postgres hands back
+                   -- timestamptz in the session zone, which is UTC here, while
+                   -- the poller logs in the container's zone -- so the same
+                   -- instant printed as two different times.
+                   to_char(c.updated_at      AT TIME ZONE u.timezone, 'YYYY-MM-DD HH24:MI') AS stored,
+                   to_char(s.last_attempt_at AT TIME ZONE u.timezone, 'YYYY-MM-DD HH24:MI') AS attempt,
+                   to_char(s.last_success_at AT TIME ZONE u.timezone, 'YYYY-MM-DD HH24:MI') AS success,
+                   s.last_error,
                    (SELECT count(*) FROM diet.measurements m
-                     WHERE m.user_id = u.user_id AND m.source = 'garmin') AS readings
+                     WHERE m.user_id = u.user_id AND m.source = 'garmin') AS readings,
+                   (SELECT max(local_date)::text FROM diet.measurements m
+                     WHERE m.user_id = u.user_id AND m.source = 'garmin') AS newest
             FROM diet.garmin_credentials c
             JOIN auth.users u USING (user_id)
             LEFT JOIN diet.sync_state s
@@ -348,10 +357,13 @@ def cmd_garmin_status(args) -> None:
     if not rows:
         return print("no Garmin sessions stored")
     for r in rows:
-        ok = r["last_success_at"].strftime("%Y-%m-%d %H:%M") if r["last_success_at"] else "never"
-        print(f"  {r['email']:26} last success {ok:16} readings {r['readings']}")
+        print(f"  {r['email']}  ({r['timezone']}; times below are in that zone)")
+        print(f"    session stored   {r['stored']}")
+        print(f"    last attempt     {r['attempt'] or 'never'}")
+        print(f"    last success     {r['success'] or 'never'}")
+        print(f"    readings         {r['readings']}, newest {r['newest'] or 'none'}")
         if r["last_error"]:
-            print(f"  {'':26} last error: {r['last_error'][:90]}")
+            print(f"    last error       {r['last_error'][:90]}")
 
 
 # (description, [(food, grams, kcal, protein_g, carb_g, fat_g)])
