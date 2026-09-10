@@ -132,3 +132,57 @@ def correct_meal(cur, *, meal_id, description: str | None = None, eaten_at=None,
             "local_date": new["local_date"].isoformat(),
             "eaten_at": new["eaten_at"].isoformat(),
             "items": count}
+
+
+# --- targets ---------------------------------------------------------------
+
+def set_target(cur, *, effective_from, kcal=None, protein_g=None, note=None) -> dict:
+    """
+    Set the target in force from a date. Retroactive by design.
+
+    Omitted fields are inherited from whatever was in force on that date, so
+    "raise protein from the 1st" does not require restating calories. If a row
+    already sits on that exact date it is that row that is inherited from and
+    replaced, which makes editing one in place work as expected.
+
+    What is stored is always a complete target: per-field effective dating would
+    make "what applied on day D" ambiguous to answer.
+    """
+    from .queries import _TARGET_ON_SQL
+
+    if kcal is None or protein_g is None:
+        cur.execute(_TARGET_ON_SQL, {"d": effective_from})
+        current = cur.fetchone()
+        if current is None:
+            missing = "calories" if kcal is None else "protein"
+            raise WriteRejected(
+                f"no target is in force on {effective_from}, so {missing} cannot be "
+                "inherited — give both kcal and protein_g for the first one")
+        kcal = current["kcal"] if kcal is None else kcal
+        protein_g = current["protein_g"] if protein_g is None else protein_g
+
+    cur.execute(
+        """INSERT INTO diet.targets (user_id, effective_from, kcal, protein_g, note)
+           VALUES (diet.current_user_id(), %s, %s, %s, %s)
+           ON CONFLICT (user_id, effective_from) DO UPDATE
+             SET kcal = EXCLUDED.kcal, protein_g = EXCLUDED.protein_g,
+                 note = EXCLUDED.note, created_at = now()
+           RETURNING effective_from, kcal::int AS kcal,
+                     round(protein_g, 1) AS protein_g, note""",
+        (effective_from, kcal, protein_g, note))
+    row = cur.fetchone()
+    return {"effective_from": row["effective_from"].isoformat(),
+            "kcal": row["kcal"], "protein_g": float(row["protein_g"]),
+            "note": row["note"]}
+
+
+def clear_target(cur, *, effective_from) -> bool:
+    """
+    Remove the target set on exactly this date. Returns whether one existed.
+
+    Only an exact match: deleting by proximity would silently shift the whole
+    timeline after it, which is the opposite of what someone correcting a
+    mistyped date wants.
+    """
+    cur.execute("DELETE FROM diet.targets WHERE effective_from = %s", (effective_from,))
+    return cur.rowcount > 0

@@ -108,8 +108,14 @@ itself.
 
 ## MCP
 
-Five tools at `POST /mcp`: `log_meal`, `correct_meal`, `get_day`, `get_range`,
-`query_sql`. Two ways to authenticate, on the same server:
+Eight tools at `POST /mcp`: `log_meal`, `correct_meal`, `get_day`, `get_range`,
+`get_targets`, `set_target`, `clear_target`, `query_sql`.
+
+Targets are effective-dated — set from a date, applying until a later one
+supersedes it — so asking Claude to "set 1800 kcal from the 1st" re-scores
+exactly the days from then onwards and leaves earlier ones judged against what
+you were actually aiming at. They are managed only through Claude; the page
+shows the one in force and since when. Two ways to authenticate, on the same server:
 
 **Bearer token** — for Claude Code, MCP Inspector and scripts:
 

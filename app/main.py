@@ -13,6 +13,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from datetime import date as date_cls, datetime, timezone as dt_timezone
+from zoneinfo import ZoneInfo
 
 import psycopg
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -297,9 +298,13 @@ def me(user: auth.User = Depends(current_user)):
 @app.get("/api/days")
 def days(days: int = 7, user: auth.User = Depends(current_user)):
     n = max(1, min(int(days), 60))
+    today = datetime.now(ZoneInfo(user.timezone)).date()
     with db.user_tx(user.user_id) as cur:
         rows = queries.days(cur, user.timezone, n)
-    return {"timezone": user.timezone, "days": rows}
+        # The whole entry in force today, not just its numbers: the page shows
+        # since when it has applied, which is the point of effective dating.
+        target = queries.target_on(cur, today)
+    return {"timezone": user.timezone, "days": rows, "target": target}
 
 
 @app.get("/api/day/{day}")

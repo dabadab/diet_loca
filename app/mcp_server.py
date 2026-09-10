@@ -233,6 +233,77 @@ def get_range(from_date: str | None = None, to_date: str | None = None,
 
 
 @mcp.tool
+def get_targets(date: str | None = None) -> dict:
+    """
+    The calorie and protein targets, and which one applies on a given day.
+
+    Targets are effective-dated: one is set from a date and applies until a
+    later one supersedes it, so a day is always scored against what was being
+    aimed at then rather than against the current figure. `date` is YYYY-MM-DD
+    in the user's timezone and defaults to today. Days before the earliest
+    target have none, which is reported as null rather than as a missed target.
+    """
+    user_id, tz = _identity()
+    when = _parse_date(date, tz)
+    with db.user_tx(user_id) as cur:
+        return {"date": when.isoformat(),
+                "in_force": queries.target_on(cur, when),
+                "history": queries.targets_list(cur)}
+
+
+@mcp.tool
+def set_target(effective_from: str, kcal: float | None = None,
+               protein_g: float | None = None, note: str | None = None) -> dict:
+    """
+    Set the target that applies from a date onwards.
+
+    Works retroactively: give a past `effective_from` and every day from there
+    until the next target re-scores, which is how to correct a target that was
+    changed in real life before it was recorded here. Future dates are allowed.
+
+    Omit `kcal` or `protein_g` to keep whatever is already in force on that date
+    — so raising protein alone does not require restating calories. Setting the
+    same date twice replaces that entry rather than stacking another.
+
+    `note` is free text for why it changed ("start of cut"), and is worth
+    filling in: it is the only record of the reason.
+    """
+    user_id, tz = _identity()
+    when = _parse_date(effective_from, tz)
+    try:
+        with db.user_tx(user_id) as cur:
+            saved = writes.set_target(cur, effective_from=when, kcal=kcal,
+                                      protein_g=protein_g, note=note)
+            saved["history"] = queries.targets_list(cur)
+            return saved
+    except writes.WriteRejected as exc:
+        raise ToolError(str(exc)) from None
+    except psycopg.Error as exc:
+        raise _explain(exc) from None
+
+
+@mcp.tool
+def clear_target(effective_from: str) -> dict:
+    """
+    Remove the target entry set on exactly this date.
+
+    For undoing an entry made on the wrong date — the days it covered fall back
+    to the entry before it. Only an exact date matches, because removing a
+    nearby one instead would shift the whole timeline after it.
+    """
+    user_id, tz = _identity()
+    when = _parse_date(effective_from, tz)
+    with db.user_tx(user_id) as cur:
+        if not writes.clear_target(cur, effective_from=when):
+            existing = [t["effective_from"] for t in queries.targets_list(cur)]
+            raise ToolError(
+                f"no target is set on {when.isoformat()}. "
+                + (f"Dates with an entry: {', '.join(existing[:8])}"
+                   if existing else "No targets have been set at all."))
+        return {"cleared": when.isoformat(), "history": queries.targets_list(cur)}
+
+
+@mcp.tool
 def query_sql(sql: str) -> dict:
     """
     Run a read-only SQL query against the user's own data, for questions the
@@ -242,7 +313,7 @@ def query_sql(sql: str) -> dict:
     the identity tables at all. Row-level security still applies, so you can
     only ever read this user's rows — write the query as if the tables held
     their data alone. Tables: diet.meals, diet.meal_items, diet.measurements,
-    diet.sync_state. Single SELECT (or WITH) statement, at most
+    diet.sync_state, diet.targets. Single SELECT (or WITH) statement, at most
     500 rows returned.
     """
     if not db.ro_pool_ready():

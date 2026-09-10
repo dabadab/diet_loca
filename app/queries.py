@@ -56,11 +56,23 @@ SELECT cal.local_date                                        AS date,
        -- presenting an incomplete figure as a real expenditure total.
        (meas.total_kcal IS NULL AND meas.active_kcal IS NOT NULL) AS energy_out_partial,
        round(meas.weight_kg::numeric, 1)                     AS weight_kg,
+       tgt.kcal::int                                         AS target_kcal,
+       round(tgt.protein_g, 1)                               AS target_protein_g,
        coalesce(logged.meals, 0)::int                        AS meals_logged,
        CASE WHEN intake.any_estimated IS TRUE THEN 'claude-estimate'
             WHEN intake.kcal IS NOT NULL      THEN 'manual'
             ELSE NULL END                                    AS intake_source
 FROM cal
+-- The target in force on that day: the latest row dated on or before it.
+-- NULL means none had been set yet, which must survive to the UI rather than
+-- being defaulted -- a day before the first target was not a missed target.
+LEFT JOIN LATERAL (
+    SELECT t.kcal, t.protein_g
+    FROM diet.targets t
+    WHERE t.effective_from <= cal.local_date
+    ORDER BY t.effective_from DESC
+    LIMIT 1
+) tgt ON true
 LEFT JOIN intake ON intake.local_date = cal.local_date
 LEFT JOIN logged ON logged.local_date = cal.local_date
 LEFT JOIN meas   ON meas.local_date   = cal.local_date
@@ -74,7 +86,7 @@ def days(cur, timezone: str, n: int) -> list[dict]:
     rows = [dict(r) for r in cur.fetchall()]
     for r in rows:
         r["date"] = r["date"].isoformat()
-        for k in ("weight_kg", "protein_g", "carb_g", "fat_g"):
+        for k in ("weight_kg", "protein_g", "carb_g", "fat_g", "target_protein_g"):
             if r[k] is not None:
                 r[k] = float(r[k])
     # A window of entirely empty days is not data; say so, so the UI can show
@@ -147,11 +159,16 @@ def day_detail(cur, local_date) -> dict:
         {**dict(r), "ts_utc": r["ts_utc"].isoformat()} for r in cur.fetchall()
     ]
 
+    cur.execute(_TARGET_ON_SQL, {"d": local_date})
+    tgt = cur.fetchone()
+
     return {
         "date": str(local_date),
         "meals": meals,
         "measurements": measurements,
         "energy_in_kcal": round(sum(m["kcal"] for m in meals)) if meals else None,
+        "target_kcal": tgt["kcal"] if tgt else None,
+        "target_protein_g": float(tgt["protein_g"]) if tgt else None,
     }
 
 
@@ -222,3 +239,44 @@ def garmin_diagnostics(cur, timezone: str) -> dict:
         # that measures impedance, so its absence is normal for most people.
         "metrics_never_seen": [m for m in KNOWN_METRICS if m not in seen],
     }
+
+
+# --- targets ---------------------------------------------------------------
+# Effective-dated: a row applies from its date until a later one supersedes it.
+# Everything here resolves by that rule rather than reading a "current" value,
+# which is what lets a target set retroactively re-score exactly the days it
+# should.
+
+_TARGET_ON_SQL = """
+    SELECT effective_from, kcal::int AS kcal, round(protein_g, 1) AS protein_g, note
+    FROM diet.targets
+    WHERE effective_from <= %(d)s
+    ORDER BY effective_from DESC
+    LIMIT 1
+"""
+
+
+def target_on(cur, day) -> dict | None:
+    """The target in force on a date, or None if none had been set by then."""
+    cur.execute(_TARGET_ON_SQL, {"d": day})
+    row = cur.fetchone()
+    if row is None:
+        return None
+    return {"effective_from": row["effective_from"].isoformat(),
+            "kcal": row["kcal"],
+            "protein_g": float(row["protein_g"]),
+            "note": row["note"]}
+
+
+def targets_list(cur) -> list[dict]:
+    """Every target ever set, newest first -- the timeline, not just the tip."""
+    cur.execute("""
+        SELECT effective_from, kcal::int AS kcal, round(protein_g, 1) AS protein_g,
+               note, created_at
+        FROM diet.targets ORDER BY effective_from DESC
+    """)
+    return [{"effective_from": r["effective_from"].isoformat(),
+             "kcal": r["kcal"],
+             "protein_g": float(r["protein_g"]),
+             "note": r["note"],
+             "set_at": r["created_at"].isoformat()} for r in cur.fetchall()]

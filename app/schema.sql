@@ -500,6 +500,32 @@ CREATE TABLE IF NOT EXISTS diet.garmin_credentials (
   updated_at        timestamptz NOT NULL DEFAULT now()
 );
 
+-- -------------------------------------------------------------- targets ---
+-- Effective-dated, not a single current value. A target is what you were
+-- aiming at *then*, so storing one number and applying it to all of history
+-- re-scores every past day whenever the goal changes -- a maintenance week
+-- becomes a failure the moment a cut starts. Resolution is "the greatest
+-- effective_from <= the day", which also makes retroactive edits free: insert
+-- a row with a past date and exactly the days from there onwards re-score.
+
+CREATE TABLE IF NOT EXISTS diet.targets (
+  target_id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  user_id        uuid NOT NULL REFERENCES auth.users(user_id) ON DELETE CASCADE,
+  effective_from date NOT NULL,
+  -- Complete, never a delta: per-field effective dating would make "what
+  -- applied on day D" ambiguous. set_target fills omissions from whatever was
+  -- in force, so every stored row answers the question on its own.
+  kcal           numeric(6,0) NOT NULL CHECK (kcal BETWEEN 500 AND 10000),
+  protein_g      numeric(5,1) NOT NULL CHECK (protein_g BETWEEN 0 AND 500),
+  note           text CHECK (note IS NULL OR length(note) BETWEEN 1 AND 500),
+  created_at     timestamptz NOT NULL DEFAULT now(),
+  -- One per day; setting the same date again replaces rather than stacks.
+  UNIQUE (user_id, effective_from)
+);
+
+CREATE INDEX IF NOT EXISTS targets_lookup_idx
+  ON diet.targets (user_id, effective_from DESC);
+
 -- ---------------------------------------------------------------- RLS -----
 -- Applied by loop rather than by hand: adding a table to the list is the only
 -- thing anyone has to remember, and no table can quietly end up unprotected.
@@ -508,7 +534,7 @@ DO $rls$
 DECLARE t text;
 BEGIN
   FOREACH t IN ARRAY ARRAY['measurements', 'meals', 'meal_items',
-                           'sync_state', 'garmin_credentials'] LOOP
+                           'sync_state', 'garmin_credentials', 'targets'] LOOP
     EXECUTE format('ALTER TABLE diet.%I ENABLE ROW LEVEL SECURITY', t);
     -- FORCE so the table owner is bound by the policy too.
     EXECUTE format('ALTER TABLE diet.%I FORCE ROW LEVEL SECURITY', t);
@@ -531,7 +557,8 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA diet TO diet_app;
 -- real contract and are listed one table at a time. A blanket grant on the
 -- schema also handed it diet.garmin_credentials, which the tool's own docstring
 -- never claimed and no query through it should reach.
-GRANT SELECT ON diet.meals, diet.meal_items, diet.measurements, diet.sync_state
+GRANT SELECT ON diet.meals, diet.meal_items, diet.measurements, diet.sync_state,
+                diet.targets
   TO diet_ro;
 REVOKE ALL ON diet.garmin_credentials FROM diet_ro;
 

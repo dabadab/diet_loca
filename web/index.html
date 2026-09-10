@@ -73,6 +73,8 @@
     font-size: 0.8rem; color: var(--ink-soft); line-height: 1.7;
   }
   .goal-line b { color: var(--ink); font-weight: 600; }
+  .goal-line .since, .no-target { color: var(--ink-soft); font-weight: 400; font-size: 0.92em; }
+  .no-target { font-style: italic; margin-left: 6px; }
   .goal-line input {
     font: inherit; font-weight: 600; color: var(--ink); width: 5ch;
     background: transparent; border: none; border-bottom: 1px dashed var(--ink-soft);
@@ -320,7 +322,6 @@
 "use strict";
 
 // Identity is the session cookie. No endpoint takes a user id.
-const GOALS_KEY = "diet-log-goals";
 const WINDOW_DAYS = 28;
 
 let state = {
@@ -329,7 +330,7 @@ let state = {
   activeDate: null,      // the day shown in full
   detail: {},        // date -> /api/day payload
   me: null,
-  goals: { kcal: 1800, protein: 150 },
+  target: null,          // what applies today, resolved server-side
 };
 
 // --- plumbing --------------------------------------------------------------
@@ -354,28 +355,30 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
 const n0 = (v) => v == null ? "—" : Math.round(v).toLocaleString();
 const n1 = (v) => v == null ? "—" : Number(v).toFixed(1);
 
-function loadGoals() {
-  try {
-    const raw = localStorage.getItem(GOALS_KEY);
-    if (raw) state.goals = { ...state.goals, ...JSON.parse(raw) };
-  } catch (_) { /* private mode, or nothing stored */ }
-}
-function saveGoals() {
-  try { localStorage.setItem(GOALS_KEY, JSON.stringify(state.goals)); } catch (_) {}
-}
-
 // --- pieces ----------------------------------------------------------------
 
+// A day before the first target was not a missed target, so with no goal the
+// value is shown on its own rather than divided by an invented default.
 function bar(label, value, goal, cls, unit) {
+  const fmt = (v) => unit === "kcal" ? n0(v) : n1(v);
   const known = value != null;
+  if (goal == null) {
+    return `
+      <div class="metric">
+        <div class="metric-label">
+          <span class="name">${esc(label)}</span>
+          <span class="value">${known ? `${fmt(value)} ${unit}` : "—"}
+            <span class="no-target">no target set</span></span>
+        </div>
+      </div>`;
+  }
   const pct = known && goal > 0 ? Math.min(100, (value / goal) * 100) : 0;
   const over = known && value > goal;
-  const shown = unit === "kcal" ? n0(value) : n1(value);
   return `
     <div class="metric">
       <div class="metric-label">
         <span class="name">${esc(label)}</span>
-        <span class="value">${shown} / ${unit === "kcal" ? n0(goal) : n1(goal)} ${unit}</span>
+        <span class="value">${known ? fmt(value) : "—"} / ${fmt(goal)} ${unit}</span>
       </div>
       <div class="bar-track"><div class="bar-fill ${over ? "over" : cls}" style="width:${pct}%"></div></div>
     </div>`;
@@ -402,18 +405,15 @@ function renderGoalLine() {
   box.innerHTML = `
     <div class="who">signed in as <b>${esc(state.me.display_name)}</b> ·
       <button id="signOut">sign out</button></div>
-    <div>target <input id="goalKcal" type="number" min="0" step="10" value="${state.goals.kcal}"> kcal ·
-      <input id="goalProtein" type="number" min="0" step="5" value="${state.goals.protein}"> g protein</div>`;
+    <div>${state.target
+      ? `target <b>${n0(state.target.kcal)}</b> kcal · <b>${n1(state.target.protein_g)}</b> g protein
+         <span class="since">since ${esc(state.target.effective_from)}</span>`
+      : '<span class="since">no target set — ask Claude to set one</span>'}</div>`;
   el("signOut").onclick = async () => {
     await api("/api/logout", { method: "POST" }).catch(() => {});
     location.reload();
   };
-  for (const [id, key] of [["goalKcal", "kcal"], ["goalProtein", "protein"]]) {
-    el(id).addEventListener("change", (ev) => {
-      const v = parseFloat(ev.target.value);
-      if (!isNaN(v) && v >= 0) { state.goals[key] = v; saveGoals(); render(); }
-    });
-  }
+
 }
 
 function renderModeTabs() {
@@ -488,8 +488,8 @@ function dayCard() {
       ${balanceLine(d.energy_in_kcal, d.energy_out_kcal, { partial: d.energy_out_partial })}
       <div style="height:16px"></div>
 
-      ${bar("calories", d.energy_in_kcal, state.goals.kcal, "kcal", "kcal")}
-      ${bar("protein", d.protein_g, state.goals.protein, "protein", "g")}
+      ${bar("calories", d.energy_in_kcal, d.target_kcal, "kcal", "kcal")}
+      ${bar("protein", d.protein_g, d.target_protein_g, "protein", "g")}
       ${(d.carb_g != null || d.fat_g != null)
         ? `<div class="avg-line">carbs ${n1(d.carb_g)} g · fat ${n1(d.fat_g)} g</div>` : ""}
 
@@ -590,6 +590,7 @@ async function loadDetail(date) {
 function statsFor(list) {
   const add = (xs, k) => xs.reduce((a, d) => a + (d[k] || 0), 0);
   const withIntake = list.filter((d) => d.energy_in_kcal != null);
+  const scored = withIntake.filter((d) => d.target_kcal != null);
   const withOut = list.filter((d) => d.energy_out_kcal != null);
   const both = list.filter((d) => d.energy_in_kcal != null && d.energy_out_kcal != null);
   return {
@@ -601,6 +602,17 @@ function statsFor(list) {
     out: add(withOut, "energy_out_kcal"),
     bothDays: both.length,
     balance: add(both, "energy_in_kcal") - add(both, "energy_out_kcal"),
+    // Summed per day, not target x days: the target in force changes over the
+    // window, and multiplying today's by the day count is what made a past
+    // week look like a failure the moment the goal moved.
+    // Both sides of the bar must cover the same days. Summing intake over every
+    // logged day while summing targets over only the days that had one compares
+    // different sets and guarantees the bar reads as over.
+    targetDays: scored.length,
+    targetKcal: add(scored, "target_kcal"),
+    targetProtein: add(scored, "target_protein_g"),
+    scoredKcal: add(scored, "energy_in_kcal"),
+    scoredProtein: add(scored, "protein_g"),
   };
 }
 
@@ -639,9 +651,15 @@ function statsBlock(st) {
   return `
     ${avgRow(st)}
     ${d ? `
-      ${bar("calories, total", st.kcal, state.goals.kcal * d, "kcal", "kcal")}
-      ${bar("protein, total", st.protein, state.goals.protein * d, "protein", "g")}
-      <div class="avg-line">totals and bars cover the ${d} of ${st.n} day${st.n === 1 ? "" : "s"} with meals logged</div>
+      ${st.targetDays
+        ? `${bar("calories vs target", st.scoredKcal, st.targetKcal, "kcal", "kcal")}
+           ${bar("protein vs target", st.scoredProtein, st.targetProtein, "protein", "g")}
+           <div class="avg-line">bars cover the ${st.targetDays} day${st.targetDays === 1 ? "" : "s"}
+             that had a target${st.targetDays < d
+               ? `; the other ${d - st.targetDays} with meals logged had none` : ""}</div>`
+        : `<div class="avg-line">no target was set on any of these days, so there is
+             nothing to score the totals against</div>`}
+      <div class="avg-line">averages cover the ${d} of ${st.n} day${st.n === 1 ? "" : "s"} with meals logged</div>
     ` : ""}
     ${st.bothDays ? `<div class="balance-line" style="margin-top:12px">
       total ${st.balance <= 0 ? "deficit" : "surplus"} over ${st.bothDays} day${st.bothDays === 1 ? "" : "s"}
@@ -687,8 +705,10 @@ function renderRollup() {
 
   const all = statsFor(recorded);
   const withIntake = recorded.filter((d) => d.energy_in_kcal != null);
-  const overKcal = withIntake.filter((d) => d.energy_in_kcal > state.goals.kcal).length;
-  const hitProtein = withIntake.filter((d) => (d.protein_g || 0) >= state.goals.protein).length;
+  // Only days that had a target can be scored against one.
+  const scored = withIntake.filter((d) => d.target_kcal != null);
+  const overKcal = scored.filter((d) => d.energy_in_kcal > d.target_kcal).length;
+  const hitProtein = scored.filter((d) => (d.protein_g || 0) >= (d.target_protein_g || 0)).length;
   const weights = recorded.filter((d) => d.weight_kg != null);
 
   box.innerHTML = `
@@ -696,9 +716,9 @@ function renderRollup() {
       <div class="block-title"><h2>Complete days</h2>
         <span class="sub">${all.n} days · ${all.intakeDays} with meals · today excluded</span></div>
       ${statsBlock(all)}
-      ${all.intakeDays ? `<div class="avg-line" style="margin-top:12px">
-        calorie target exceeded on ${overKcal} of ${all.intakeDays} logged days ·
-        protein target met on ${hitProtein} of ${all.intakeDays}</div>` : ""}
+      ${scored.length ? `<div class="avg-line" style="margin-top:12px">
+        calorie target exceeded on ${overKcal} of ${scored.length} days with a target ·
+        protein target met on ${hitProtein} of ${scored.length}</div>` : ""}
       ${weights.length >= 2 ? `<div class="avg-line">
         weight ${n1(weights[weights.length - 1].weight_kg)} kg → ${n1(weights[0].weight_kg)} kg
         over ${weights.length} weigh-ins</div>` : ""}
@@ -869,7 +889,6 @@ function render() {
 }
 
 async function boot() {
-  loadGoals();
   try {
     state.me = await api("/api/me");
   } catch (err) {
@@ -883,6 +902,7 @@ async function boot() {
 
   const data = await api(`/api/days?days=${WINDOW_DAYS}`);
   state.days = data.days || [];
+  state.target = data.target || null;
   el("foot").textContent = state.days.length
     ? `days shown in ${data.timezone}`
     : "no days recorded yet — log a meal through Claude, or run the Garmin sync";

@@ -295,6 +295,39 @@ Things worth knowing:
   the client choosing to call it, `manage.py revoke-connection` kills tokens
   from this side.
 
+## Targets (implemented)
+
+Calorie and protein targets are **effective-dated**: a row in `diet.targets` is
+set from a date and applies until a later one supersedes it. Resolution is a
+lateral join picking the greatest `effective_from <= the day`.
+
+They began as two numbers in the browser's `localStorage`, which was wrong in a
+way worth recording. Not because it was per-browser — because it was a single
+*current* value applied to all of history. The weekly bar computed
+`goal x days`, so changing the target re-scored every past day against it: a
+maintenance week became a failure the moment a cut started. A target is what
+you were aiming at *then*, and the schema now says so.
+
+- **Retroactive editing is free**, not a feature bolted on. Insert a row with a
+  past date and exactly the days from there until the next one re-score,
+  because nothing stores a per-day copy.
+- **Rows are complete, never deltas.** Per-field effective dating would make
+  "what applied on day D" ambiguous. `set_target` fills anything omitted from
+  whatever was in force on that date, so a stored row answers on its own.
+- **Days before the first row have no target**, reported as null rather than
+  defaulted. A day before you set one was not a missed target, and the UI shows
+  the value with no bar rather than inventing a denominator.
+- **Both sides of a summary bar cover the same days.** Summing intake over
+  every logged day against targets over only the days that had one compares
+  different sets — the same error as counting a Garmin-only day as zero
+  calories, and it reappeared here during the UI work.
+- Management is MCP-only: `get_targets`, `set_target`, `clear_target`. The page
+  displays the target in force and when it started, and has no editing surface,
+  so there is no second dateless way to change one.
+- `diet_ro` is granted `SELECT`, so `query_sql` can answer "which days did I
+  miss protein". Deliberate: that grant list has been opt-in since the security
+  review.
+
 ## Frontend
 
 Custom HTML/JS (not Grafana) for the human-facing side, since the user wants
