@@ -300,7 +300,7 @@ _ACTIVITY_SQL = """
            duration_s, moving_s, distance_m, kcal, avg_hr, max_hr,
            elevation_gain_m, avg_speed_mps,
            training_effect_aerobic, training_effect_anaerobic,
-           hr_zones, power_zones
+           hr_zones
     FROM diet.activities
 """
 

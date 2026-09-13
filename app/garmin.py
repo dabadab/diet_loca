@@ -256,6 +256,27 @@ ACTIVITY_SPECS: tuple[FieldSpec, ...] = (
 )
 
 
+# Garmin sends the intensity breakdown inline, as hrTimeInZone_1..5 holding
+# seconds. There is a per-activity /hrTimeInZones endpoint too, and this code
+# used to call it -- one request per workout for figures that were already in
+# hand. Reading them here is what keeps an activity poll to a single request.
+HR_ZONE_COUNT = 5
+
+
+def _hr_zones(item: dict) -> list[dict] | None:
+    """Seconds per heart-rate zone, or None for an activity recorded without."""
+    out = []
+    for n in range(1, HR_ZONE_COUNT + 1):
+        secs = item.get(f"hrTimeInZone_{n}")
+        if secs is None:
+            continue
+        try:
+            out.append({"zone": n, "secs": float(secs)})
+        except (TypeError, ValueError):
+            log.warning("garmin: hrTimeInZone_%d was %r, not a number", n, secs)
+    return out or None
+
+
 def _parse_gmt(value: Any) -> datetime | None:
     """Garmin's 'YYYY-MM-DD HH:MM:SS', which is UTC despite carrying no zone."""
     if not isinstance(value, str):
@@ -290,6 +311,7 @@ def extract_activity(item: Any) -> dict | None:
         "external_id": str(external_id),
         "started_at": started_at,
         "activity_type": str(activity_type)[:100],
+        "hr_zones": _hr_zones(item),
         "raw": _strip_location(item),
     }
     for spec in ACTIVITY_SPECS:
@@ -327,72 +349,6 @@ def fetch_activities(api: Any, start: date_cls, end: date_cls,
             log.warning("garmin: could not write raw activities for %s..%s: %s",
                         start, end, exc)
     return items
-
-
-# Garmin's own key names for a zone bucket, mapped to what gets stored. The
-# library does not parse these, so they are confirmed against a real response
-# rather than trusted: a key that is missing is left out, never invented.
-_ZONE_KEYS = (("zone", ("zoneNumber",)),
-              ("secs", ("secsInZone",)),
-              ("kcal", ("zoneCalories",)))
-
-
-def _zone_rows(payload: Any, boundary_key: str) -> list[dict] | None:
-    if not isinstance(payload, list) or not payload:
-        return None
-    out = []
-    for bucket in payload:
-        if not isinstance(bucket, dict):
-            continue
-        row: dict[str, Any] = {}
-        for name, candidates in _ZONE_KEYS:
-            for c in candidates:
-                if bucket.get(c) is not None:
-                    row[name] = bucket[c]
-                    break
-        if bucket.get("zoneLowBoundary") is not None:
-            row[boundary_key] = bucket["zoneLowBoundary"]
-        if row:
-            out.append(row)
-    return out or None
-
-
-def fetch_zones(api: Any, external_id: str, *,
-                power: bool) -> tuple[list[dict] | None, list[dict] | None, bool]:
-    """
-    Time-in-zone for one activity: the intensity distribution the summary lacks.
-
-    Returns (hr, power, answered). `answered` is the important one: an activity
-    with no heart-rate strap legitimately has no zones, and a request that
-    failed also produces none, and the caller must tell those apart -- the first
-    should never be asked about again, the second should be retried. Without
-    that flag one Garmin hiccup would mark the activity permanently zoneless.
-
-    Power is asked for only when the summary reported one, since most activities
-    have no meter and asking anyway doubles the cost for nothing. A rate limit
-    propagates -- that is the whole reason the backfill is budgeted -- but any
-    other failure is swallowed so the activities already fetched this pass are
-    not lost with it.
-    """
-    hr = pw = None
-    answered = True
-    try:
-        hr = _zone_rows(api.get_activity_hr_in_timezones(external_id), "low_hr")
-    except Exception as exc:
-        if is_rate_limited(exc):
-            raise
-        log.warning("garmin: HR zones for activity %s failed: %s", external_id, exc)
-        answered = False
-    if power:
-        try:
-            pw = _zone_rows(api.get_activity_power_in_timezones(external_id), "low_w")
-        except Exception as exc:
-            if is_rate_limited(exc):
-                raise
-            log.warning("garmin: power zones for activity %s failed: %s",
-                        external_id, exc)
-            answered = False
-    return hr, pw, answered
 
 
 def is_rate_limited(exc: BaseException) -> bool:

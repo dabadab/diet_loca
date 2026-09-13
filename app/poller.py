@@ -64,11 +64,12 @@ INSERT INTO diet.activities
   (user_id, source, external_id, started_at, activity_type, name,
    duration_s, moving_s, distance_m, kcal, avg_hr, max_hr,
    elevation_gain_m, avg_speed_mps,
-   training_effect_aerobic, training_effect_anaerobic, raw)
+   training_effect_aerobic, training_effect_anaerobic, hr_zones, raw)
 VALUES (diet.current_user_id(), 'garmin', %(external_id)s, %(started_at)s,
         %(activity_type)s, %(name)s, %(duration_s)s, %(moving_s)s, %(distance_m)s,
         %(kcal)s, %(avg_hr)s, %(max_hr)s, %(elevation_gain_m)s, %(avg_speed_mps)s,
-        %(training_effect_aerobic)s, %(training_effect_anaerobic)s, %(raw)s)
+        %(training_effect_aerobic)s, %(training_effect_anaerobic)s,
+        %(hr_zones)s, %(raw)s)
 ON CONFLICT (user_id, source, external_id) DO UPDATE SET
   started_at = EXCLUDED.started_at, activity_type = EXCLUDED.activity_type,
   name = EXCLUDED.name, duration_s = EXCLUDED.duration_s,
@@ -78,7 +79,7 @@ ON CONFLICT (user_id, source, external_id) DO UPDATE SET
   avg_speed_mps = EXCLUDED.avg_speed_mps,
   training_effect_aerobic = EXCLUDED.training_effect_aerobic,
   training_effect_anaerobic = EXCLUDED.training_effect_anaerobic,
-  raw = EXCLUDED.raw, ingested_at = now()
+  hr_zones = EXCLUDED.hr_zones, raw = EXCLUDED.raw, ingested_at = now()
 """
 
 
@@ -187,7 +188,8 @@ def _write_activities(user_id, rows: list[dict]) -> tuple[int, list[str]]:
     stored, rejected = 0, []
     with db.user_tx(user_id) as cur:
         for row in rows:
-            params = dict(row, raw=Json(row["raw"]))
+            params = dict(row, raw=Json(row["raw"]),
+                          hr_zones=Json(row["hr_zones"]) if row["hr_zones"] else None)
             cur.execute("SAVEPOINT activity")
             try:
                 cur.execute(ACTIVITY_UPSERT, params)
@@ -203,89 +205,12 @@ def _write_activities(user_id, rows: list[dict]) -> tuple[int, list[str]]:
     return stored, rejected
 
 
-def _zone_backlog(user_id, budget: int) -> list[dict]:
-    """
-    Activities still owed a zone request, newest first.
-
-    Selected through user_tx so RLS scopes it -- the poller never names a user
-    in SQL. `zone_attempts` is what makes a persistently failing activity give
-    up rather than burn a request every pass forever.
-    """
-    with db.user_tx(user_id) as cur:
-        cur.execute("""
-            SELECT external_id, (raw ->> 'avgPower') IS NOT NULL AS has_power
-            FROM diet.activities
-            WHERE user_id = diet.current_user_id() AND source = 'garmin'
-              AND zones_fetched_at IS NULL AND zone_attempts < 3
-            ORDER BY started_at DESC
-            LIMIT %s""", (budget,))
-        return cur.fetchall()
-
-
-def _record_zones(user_id, external_id: str, hr, power, *, attempted_only: bool) -> None:
-    """
-    One activity's zone outcome.
-
-    The attempt is recorded *before* the request and the result after, so a
-    process that dies mid-fetch still counts the attempt. Stamping
-    zones_fetched_at even when both zone sets came back empty is deliberate: a
-    pool swim has no power zones and an activity without a HR strap has no HR
-    zones, and neither should be asked about again.
-    """
-    with db.user_tx(user_id) as cur:
-        if attempted_only:
-            cur.execute("""UPDATE diet.activities SET zone_attempts = zone_attempts + 1
-                           WHERE user_id = diet.current_user_id()
-                             AND source = 'garmin' AND external_id = %s""",
-                        (external_id,))
-        else:
-            cur.execute("""UPDATE diet.activities
-                           SET hr_zones = %s, power_zones = %s, zones_fetched_at = now()
-                           WHERE user_id = diet.current_user_id()
-                             AND source = 'garmin' AND external_id = %s""",
-                        (Json(hr) if hr else None, Json(power) if power else None,
-                         external_id))
-
-
-def backfill_zones(api, user_id, budget: int) -> int:
-    """
-    Fill in time-in-zone for activities that do not have it yet.
-
-    Once per activity, ever -- zones do not change after Garmin has processed
-    the workout -- so this settles at roughly one request a day once the
-    backlog is drained. The budget is what keeps a first run over a week's
-    window from firing thirty requests in one pass.
-    """
-    if budget <= 0:
-        return 0
-    done = 0
-    for row in _zone_backlog(user_id, budget):
-        external_id = row["external_id"]
-        _record_zones(user_id, external_id, None, None, attempted_only=True)
-        try:
-            hr, power, answered = garmin.fetch_zones(
-                api, external_id, power=row["has_power"])
-        except Exception as exc:
-            if garmin.is_rate_limited(exc):
-                raise RateLimited(str(exc)) from exc
-            raise
-        if not answered:
-            # The attempt is on the record; leave zones_fetched_at NULL so the
-            # next pass retries, until zone_attempts gives up on it.
-            continue
-        _record_zones(user_id, external_id, hr, power, attempted_only=False)
-        done += 1
-    return done
-
-
 class RateLimited(RuntimeError):
     """Garmin asked us to stop. Distinct so the loop can back off rather than retry."""
 
 
-def poll_user(account: dict, days: int, raw_root: Path | None,
-              zone_budget: int = 0) -> tuple[int, int, int, list[str]]:
-    # zone_budget of 0 means "do not spend requests on zones this pass" -- it is
-    # the caller, not the window size, that decides which cycle this is.
+def poll_user(account: dict, days: int,
+              raw_root: Path | None) -> tuple[int, int, list[str]]:
     user_id = account["user_id"]
     tz = ZoneInfo(account["timezone"])
     token_json = secretbox.decrypt(account["secret_ciphertext"], account["key_id"])
@@ -329,13 +254,11 @@ def poll_user(account: dict, days: int, raw_root: Path | None,
     activities, act_rejected = _write_activities(user_id, rows)
     rejected.extend(f"activity {b}" for b in act_rejected)
 
-    zones = backfill_zones(api, user_id, zone_budget)
-
     refreshed = garmin.session_tokens(api)
     if refreshed and refreshed != token_json:
         _store_tokens(user_id, refreshed)
         log.info("garmin: refreshed session tokens for %s", account["email"])
-    return total, activities, zones, rejected
+    return total, activities, rejected
 
 
 STATUS_FILE = Path(os.environ.get("POLLER_STATUS_FILE", "/tmp/poller-status"))
@@ -367,18 +290,9 @@ def check_status(max_age: int) -> int:
     return 0
 
 
-def run_once(settings, args, raw_root: Path | None, days: int | None = None,
-             fetch_zones: bool = True) -> int:
-    """
-    One pass over every account. `days` overrides the configured window.
-
-    `fetch_zones` is false on the short cycle: a zone lookup costs a request per
-    activity, and the whole point of the 15-minute cycle is that it is one
-    request. It is a separate argument rather than inferred from `days` so that
-    raising GARMIN_POLL_SMALL_DAYS cannot quietly start spending them.
-    """
+def run_once(settings, args, raw_root: Path | None, days: int | None = None) -> int:
+    """One pass over every account. `days` overrides the configured window."""
     window = args.days if days is None else days
-    zone_budget = settings.garmin_zone_budget if fetch_zones else 0
     prune_raw(raw_root, args.keep_raw_days)
     accounts = _accounts(settings, args.user)
     if not accounts:
@@ -397,13 +311,11 @@ def run_once(settings, args, raw_root: Path | None, days: int | None = None,
                 if not claim(account["user_id"]):
                     log.info("garmin: %s skipped, a sync is already in flight", email)
                     continue
-                stored, activities, zones, rejected = poll_user(
-                    account, window, raw_root, zone_budget)
+                stored, activities, rejected = poll_user(account, window, raw_root)
                 _record(account["user_id"], ok=True, error=None)
                 log.info("garmin: %s stored %d reading(s) and %d activity(-ies) "
-                         "over %d day(s)%s%s",
+                         "over %d day(s)%s",
                          email, stored, activities, window,
-                         f", {zones} zone set(s) backfilled" if zones else "",
                          f", {len(rejected)} rejected: {'; '.join(rejected[:4])}"
                          if rejected else "")
             except RateLimited as exc:
@@ -523,10 +435,9 @@ def main() -> int:
     # revisions, which do not need checking every quarter hour. Fetching the
     # full window at the short interval would multiply the request count
     # against an API that has already rate-limited this deployment.
-    def cycle(window: int, label: str, fetch_zones: bool = True) -> int:
+    def cycle(window: int, label: str) -> int:
         try:
-            return run_once(settings, args, raw_root, days=window,
-                            fetch_zones=fetch_zones)
+            return run_once(settings, args, raw_root, days=window)
         except Exception:
             # A crash must not end the loop; the status file records it.
             log.exception("garmin: %s cycle raised", label)
@@ -554,7 +465,7 @@ def main() -> int:
                 # The full pass covered today, so the next short one can wait.
                 next_small = now + args.interval_small + jitter(args.interval_small)
             elif now >= next_small:
-                code = cycle(args.small_days, "today", fetch_zones=False)
+                code = cycle(args.small_days, "today")
                 next_small = now + args.interval_small + jitter(args.interval_small)
             if code == 2:
                 # Retrying into a rate limit only deepens it.

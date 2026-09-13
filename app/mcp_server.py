@@ -245,10 +245,10 @@ def get_activities(from_date: str | None = None, to_date: str | None = None,
     Workouts recorded by the fitness tracker over a date range, newest first.
 
     Each one carries duration, distance, calories, average and maximum heart
-    rate, elevation, speed and training effect — plus `hr_zones` (and
-    `power_zones` where a meter was used), the seconds and calories spent in
-    each intensity zone. Zones are filled in by a background sync, so a workout
-    from the last hour or two may not have them yet.
+    rate, elevation, speed and training effect, plus `hr_zones` — the seconds
+    spent in each of the five heart-rate zones, which is what separates an easy
+    hour from a hard one when the totals look alike. An activity recorded
+    without a heart-rate reading has no zones.
 
     An activity's `kcal` is ALREADY included in that day's `active_kcal`
     measurement from `get_range`. Use activities to explain what the day's

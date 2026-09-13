@@ -453,15 +453,10 @@ CREATE TABLE IF NOT EXISTS diet.activities (
     CHECK (training_effect_aerobic IS NULL OR training_effect_aerobic BETWEEN 0 AND 5),
   training_effect_anaerobic numeric(3,1)
     CHECK (training_effect_anaerobic IS NULL OR training_effect_anaerobic BETWEEN 0 AND 5),
-  -- Zone breakdowns cost one request each, so they are backfilled once per
-  -- activity and never re-fetched: they do not change after Garmin has
-  -- processed the workout. NULL zones with a non-NULL zones_fetched_at means
-  -- "asked, there were none" -- a pool swim has no power zones -- which is why
-  -- the timestamp exists rather than testing the jsonb for emptiness.
-  hr_zones      jsonb,   -- [{"zone":1,"secs":812.0,"low_hr":93,"kcal":104.0}, ...]
-  power_zones   jsonb,   -- same shape with "low_w"; cycling with a meter only
-  zones_fetched_at timestamptz,
-  zone_attempts smallint NOT NULL DEFAULT 0,
+  -- Seconds per heart-rate zone, straight out of the activity list item's
+  -- hrTimeInZone_1..5. There is a per-activity endpoint for this too; using it
+  -- cost a request per workout for figures Garmin had already sent.
+  hr_zones      jsonb,   -- [{"zone":1,"secs":525.2}, ...]
   -- The summary verbatim, minus coordinates, so a field not promoted to a
   -- column above can be recovered without re-fetching. Coordinates are stripped
   -- on the way in: they are a location trace, they have nothing to do with
@@ -477,11 +472,15 @@ CREATE TABLE IF NOT EXISTS diet.activities (
 CREATE INDEX IF NOT EXISTS activities_lookup_idx
   ON diet.activities (user_id, local_date DESC);
 
--- Drives the zone backfill: what still needs a second request, newest first,
--- without scanning the whole history every pass.
-CREATE INDEX IF NOT EXISTS activities_zone_backlog_idx
-  ON diet.activities (user_id, started_at DESC)
-  WHERE zones_fetched_at IS NULL AND zone_attempts < 3;
+-- Zones used to be backfilled by a second request per activity, tracked by
+-- these columns and an index over the backlog. Garmin turned out to send the
+-- breakdown inline, so the request, the bookkeeping and the index are all gone.
+-- Dropped rather than left in place: a column nothing writes is a question
+-- every future reader has to answer.
+DROP INDEX IF EXISTS diet.activities_zone_backlog_idx;
+ALTER TABLE diet.activities DROP COLUMN IF EXISTS zones_fetched_at;
+ALTER TABLE diet.activities DROP COLUMN IF EXISTS zone_attempts;
+ALTER TABLE diet.activities DROP COLUMN IF EXISTS power_zones;
 
 DROP TRIGGER IF EXISTS activities_local_date ON diet.activities;
 CREATE TRIGGER activities_local_date BEFORE INSERT OR UPDATE ON diet.activities

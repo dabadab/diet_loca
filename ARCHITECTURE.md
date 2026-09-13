@@ -70,7 +70,7 @@ rather than sharing columns:
   `(user_id, source, metric, external_id)`; upsert, never plain insert, because
   Garmin backfills and revises.
 - `activities(user_id, started_at, local_date, source, external_id, activity_type,
-  duration_s, distance_m, kcal, avg_hr, hr_zones jsonb, power_zones jsonb, raw jsonb, …)`
+  duration_s, distance_m, kcal, avg_hr, hr_zones jsonb, raw jsonb, …)`
   — Garmin workouts. Not rows in `measurements`: a measurement is one scalar at
   one instant, an activity is an interval whose dozen fields are only meaningful
   together. Same upsert identity rule, because Garmin reprocesses HR and lets
@@ -202,25 +202,26 @@ this deployment; a 429 now stops all polling for a backoff period rather than
 retrying into it. A conditional UPDATE of `sync_state.last_attempt_at` is the
 claim that stops the sidecar and the web page's **Sync now** button colliding.
 
-Activities ride the same two cadences at **one extra request per pass**:
+Activities ride the same two cadences at **exactly one extra request per pass**:
 `get_activities_by_date(start, end)` returns a whole window in a single call,
 however many workouts are in it, so the small cycle asks for today and the large
 one for the configured window.
 
-Time-in-zone is the one thing the list response does not carry, and it costs a
-request *per activity*. So it is fetched **once per activity, ever** — zones do
-not change after Garmin has processed a workout — as a backlog drain keyed on
-`zones_fetched_at IS NULL`, on the large cycle only, capped at
-`GARMIN_ZONE_BUDGET` (10) per pass. Power zones are requested only when the
-summary reported `avgPower`, since most activities have no meter. Steady state
-is roughly one extra request a day.
+Time-in-zone looked like the one thing the list response did not carry, and
+there is a `/hrTimeInZones` endpoint costing a request *per activity*. It was
+built the careful way — fetch once per activity ever, large cycle only, under a
+per-pass budget, with an attempt counter so transient failures could not become
+a retry loop against an endpoint that rate-limits. Then the first real run
+showed `hrTimeInZone_1..5` sitting in the list item all along, on all eleven
+activities.
 
-Two distinctions that look pedantic and are not. A zone fetch reports whether it
-was *answered*, because an activity recorded without a heart-rate strap
-legitimately has no zones and a failed request also produces none: the first
-must never be asked about again, the second must be retried. And `zone_attempts`
-is incremented *before* the request, so three transient failures become terminal
-instead of an unbounded retry loop against an endpoint that rate-limits.
+So the endpoint, the budget, the backlog index and the `zones_fetched_at` /
+`zone_attempts` bookkeeping were all deleted, and `extract_activity` reads the
+five figures out of the payload it already has. The lesson is the one this
+codebase keeps relearning: look at a real response before building machinery to
+go and fetch what might be in it. Power zones went with it — no
+`powerTimeInZone_*` appears inline, and `raw` keeps the option open if a power
+meter ever shows up.
 
 Deeper per-activity endpoints — splits, exercise sets, weather, gear, and the
 per-second chart and GPS polyline behind `get_activity_details` — are
@@ -280,9 +281,9 @@ Built, on FastMCP 4, and verified against Postgres 13 and 17:
   that has already been corrected and points at the current head
 - `get_day(date?)` — meals with items, that day's measurements, and its activities
 - `get_range(from?, to?, metrics[]?)` — measured series only
-- `get_activities(from?, to?, activity_type?)` — workouts with their intensity
-  zones; the docstring says outright that their calories are already inside
-  `active_kcal` and must not be added to expenditure
+- `get_activities(from?, to?, activity_type?)` — workouts with their heart-rate
+  zone breakdown; the docstring says outright that their calories are already
+  inside `active_kcal` and must not be added to expenditure
 - `query_sql(sql)` — separate **read-only** Postgres role, RLS still applies
 
 Two things the testing changed. The `SELECT`-prefix check on `query_sql` is not

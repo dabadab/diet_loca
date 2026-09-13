@@ -342,8 +342,8 @@ def garmin_sync(user: auth.User = Depends(current_user)):
                "timezone": user.timezone, **cred}
     raw_root = Path(settings.garmin_raw_dir) / user.email if settings.garmin_raw_dir else None
     try:
-        stored, activities, zones, rejected = poller.poll_user(
-            account, settings.garmin_poll_days, raw_root, settings.garmin_zone_budget)
+        stored, activities, rejected = poller.poll_user(
+            account, settings.garmin_poll_days, raw_root)
     except poller.RateLimited as exc:
         message = f"Garmin rate-limited this IP: {exc}"[:300]
         poller._record(user.user_id, ok=False, error=message)
@@ -355,7 +355,7 @@ def garmin_sync(user: auth.User = Depends(current_user)):
         raise HTTPException(502, message) from None
 
     poller._record(user.user_id, ok=True, error=None)
-    return {"stored": stored, "activities": activities, "zones": zones,
+    return {"stored": stored, "activities": activities,
             "rejected": rejected, "days": settings.garmin_poll_days}
 
 
