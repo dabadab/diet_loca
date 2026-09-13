@@ -35,6 +35,8 @@ class Settings:
     web_dir: Path
     mcp_public_url: str
     garmin_stale_after_hours: int
+    garmin_poll_days: int
+    garmin_raw_dir: str
     pool_max_size: int
     mcp_enabled: bool
     mcp_path: str
@@ -89,6 +91,9 @@ def load() -> Settings:
         web_dir=Path(os.environ.get("WEB_DIR", _HERE.parent / "web")),
         mcp_public_url=public_url,
         garmin_stale_after_hours=int(os.environ.get("GARMIN_STALE_AFTER_HOURS", "24")),
+        # The window a manual sync from the web UI covers, matching the poller.
+        garmin_poll_days=int(os.environ.get("GARMIN_POLL_DAYS", "3")),
+        garmin_raw_dir=os.environ.get("GARMIN_RAW_DIR", ""),
         pool_max_size=int(os.environ.get("POOL_MAX_SIZE", "10")),
         mcp_enabled=_flag("MCP_ENABLED", True),
         # Claude.ai has a documented failure where a connector completes OAuth

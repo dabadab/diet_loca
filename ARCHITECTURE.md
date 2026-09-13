@@ -177,6 +177,15 @@ Built, in `app/garmin.py`, `app/poller.py` and `app/secretbox.py`:
   Fernet-encrypted with the key in a file outside the database. A dump of
   `diet.garmin_credentials` is therefore not a set of working sessions.
 
+Two cadences, because the two things the window is for have different tempos:
+today changes hour to hour and is fetched every 15 minutes at one day wide,
+while the trailing window exists only to catch Garmin's late arrivals and
+revisions and is fetched every two hours. Fetching the full window at the short
+interval would multiply requests against an API that has already rate-limited
+this deployment; a 429 now stops all polling for a backoff period rather than
+retrying into it. A conditional UPDATE of `sync_state.last_attempt_at` is the
+claim that stops the sidecar and the web page's **Sync now** button colliding.
+
 It runs as a sidecar container rather than the systemd timer originally planned.
 That trade needed compensating for: a restarting container has no exit code for
 anyone to read, so each cycle writes a status file the container healthcheck

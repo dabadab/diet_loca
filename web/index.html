@@ -246,6 +246,34 @@
   }
   /* Bordered cells rather than a gap-coloured grid: an incomplete last row
      otherwise leaves a filled block where a cell would have been. */
+  /* A failing Garmin sync is not a System-tab detail; it is why the numbers
+     on the page are wrong, so it says so wherever you are. */
+  .banner {
+    display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap;
+    background: var(--card); border: 1.5px solid var(--tomato);
+    border-left-width: 5px; box-shadow: 3px 3px 0 var(--tomato);
+    padding: 11px 14px; margin-bottom: 16px;
+  }
+  .banner.stale { border-color: var(--butter); box-shadow: 3px 3px 0 var(--butter); }
+  .banner .what { flex: 1; min-width: 14rem; }
+  .banner .label {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.68rem;
+    letter-spacing: .08em; text-transform: uppercase; color: var(--tomato);
+  }
+  .banner.stale .label { color: var(--butter); }
+  .banner button, .sync-row button {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.76rem;
+    border: 1.5px solid var(--ink); background: var(--paper); color: var(--ink);
+    border-radius: 3px; padding: 5px 11px; cursor: pointer;
+  }
+  .banner button:hover:not(:disabled), .sync-row button:hover:not(:disabled) { background: var(--card); }
+  .banner button:disabled, .sync-row button:disabled { opacity: .55; cursor: default; }
+  .sync-row { display: flex; gap: 10px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+  .sync-note {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.74rem;
+    color: var(--ink-soft);
+  }
+
   .facts {
     display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
     gap: 8px; margin-top: 14px;
@@ -306,6 +334,7 @@
     <div class="goal-line" id="goalLine"></div>
   </header>
 
+  <div id="banner" hidden></div>
   <div id="gate" hidden></div>
 
   <div id="main" hidden>
@@ -331,6 +360,7 @@ let state = {
   detail: {},        // date -> /api/day payload
   me: null,
   target: null,          // what applies today, resolved server-side
+  status: null,          // last /api/status payload, shared by banner and tab
 };
 
 // --- plumbing --------------------------------------------------------------
@@ -726,17 +756,75 @@ function renderRollup() {
     ${weekCards}`;
 }
 
-async function renderSystem() {
-  const box = el("systemView");
-  box.innerHTML = `<div class="block-card"><div class="empty-note">Checking…</div></div>`;
-  const t0 = performance.now();
-  let data;
+async function refreshHealth() {
   try {
-    data = await api("/api/status");
+    state.status = await api("/api/status");
   } catch (err) {
+    state.status = { error: err.message };
+  }
+  renderBanner();
+  if (state.mode === "system") renderSystem();
+}
+
+// Shown on every tab: a sync that is failing is why the numbers are wrong, and
+// finding that out requires visiting a tab you would only visit if you already
+// suspected it.
+function renderBanner() {
+  const box = el("banner");
+  const v = state.status && state.status.diagnostics && state.status.diagnostics.garmin_verdict;
+  if (!v || v.state === "ok") { box.hidden = true; box.innerHTML = ""; return; }
+  box.hidden = false;
+  box.className = `banner ${v.state === "stale" ? "stale" : ""}`;
+  box.innerHTML = `
+    <div class="what">
+      <div class="label">Garmin ${esc(v.state)}</div>
+      <div>${esc(v.summary)}</div>
+      ${v.action ? `<div class="sync-note">${esc(v.action)}</div>` : ""}
+    </div>
+    <button id="bannerSync">Sync now</button>
+    <button id="bannerSystem">Details</button>`;
+  el("bannerSystem").onclick = () => { state.mode = "system"; render(); };
+  wireSync(el("bannerSync"));
+}
+
+// One implementation, used by the banner and the System card, so the two
+// buttons cannot drift apart.
+function wireSync(btn, noteEl) {
+  if (!btn) return;
+  btn.onclick = async () => {
+    const note = noteEl || btn.parentElement.querySelector(".sync-note");
+    btn.disabled = true;
+    const was = btn.textContent;
+    btn.textContent = "Syncing…";
+    if (note) note.textContent = "asking Garmin — this takes a few seconds";
+    try {
+      const r = await api("/api/garmin/sync", { method: "POST" });
+      if (note) note.textContent =
+        `stored ${r.stored} reading${r.stored === 1 ? "" : "s"} over ${r.days} days`
+        + (r.rejected && r.rejected.length ? `; ${r.rejected.length} rejected` : "");
+      await boot();                       // targets, days and health all move
+    } catch (err) {
+      if (note) note.textContent =
+        err.code === 409 ? "a sync is already running — try again in a moment"
+        : err.code === 429 ? "Garmin rate-limited this IP; wait before retrying"
+        : err.code === 400 ? "no Garmin session stored — connect one first"
+        : `sync failed: ${err.message}`;
+      btn.disabled = false;
+      btn.textContent = was;
+      await refreshHealth();
+    }
+  };
+}
+
+function renderSystem() {
+  const box = el("systemView");
+  const data = state.status;
+  if (!data) { box.innerHTML = `<div class="block-card"><div class="empty-note">Checking…</div></div>`;
+               refreshHealth(); return; }
+  if (data.error) {
     box.innerHTML = `<div class="block-card">
       <div class="block-title"><h2>The API did not answer</h2></div>
-      <div class="empty-note">${esc(err.message)}. The page is being served, so check that
+      <div class="empty-note">${esc(data.error)}. The page is being served, so check that
       the app container is running and that nginx proxies to it.</div></div>`;
     return;
   }
@@ -745,7 +833,7 @@ async function renderSystem() {
     <div class="block-card">
       <div class="block-title">
         <h2>Where the data comes from</h2>
-        <span class="sub">round trip ${Math.round(performance.now() - t0)} ms</span>
+        <span class="sub">checked just now</span>
       </div>
       <ul class="chain">
         ${data.stages.map((s) => `
@@ -760,6 +848,7 @@ async function renderSystem() {
     </div>`;
 
   box.innerHTML = chain + garminCard(data.diagnostics);
+  wireSync(el("cardSync"), el("cardSyncNote"));
 }
 
 // The three ways a Garmin sync fails are indistinguishable from the outside --
@@ -816,6 +905,11 @@ function garminCard(diag) {
 
       ${g.last_error ? `<div class="action bad" style="margin-top:12px">
         last error: ${esc(g.last_error)}</div>` : ""}
+
+      <div class="sync-row">
+        <button id="cardSync">Sync now</button>
+        <span class="sync-note" id="cardSyncNote"></span>
+      </div>
 
       ${rows}
 
@@ -907,6 +1001,7 @@ async function boot() {
     ? `days shown in ${data.timezone}`
     : "no days recorded yet — log a meal through Claude, or run the Garmin sync";
   render();
+  refreshHealth();     // not awaited: the page is usable before the check lands
 }
 
 boot();

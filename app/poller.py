@@ -76,14 +76,44 @@ def _accounts(settings, only_email: str | None) -> list[dict]:
         return cur.fetchall()
 
 
-def _store_tokens(settings, user_id, token_json: str) -> None:
-    """Tokens refresh as they are used; persist the new ones or the next run re-authenticates."""
+def _store_tokens(user_id, token_json: str) -> None:
+    """
+    Tokens refresh as they are used; persist the new ones or the next run
+    re-authenticates. Goes through user_tx rather than the owner connection --
+    the row is the user's own and RLS scopes it, so this needs no superuser.
+    """
     ciphertext, key_id = secretbox.encrypt(token_json)
-    with _owner_conn(settings) as conn, conn.cursor() as cur:
+    with db.user_tx(user_id) as cur:
         cur.execute("""UPDATE diet.garmin_credentials
                        SET secret_ciphertext = %s, key_id = %s, updated_at = now()
-                       WHERE user_id = %s""", (ciphertext, key_id, user_id))
-        conn.commit()
+                       WHERE user_id = diet.current_user_id()""", (ciphertext, key_id))
+
+
+def claim(user_id, min_gap_seconds: float = 90.0) -> bool:
+    """
+    Take the right to sync this account, or report that something else has it.
+
+    The conditional UPDATE is the lock: the row is taken under a row lock, so
+    the manual button and the sidecar cannot both be talking to Garmin at once
+    and cannot both spend requests against a rate limit that is already tight.
+    """
+    with db.user_tx(user_id) as cur:
+        cur.execute("""
+            INSERT INTO diet.sync_state (user_id, connector, last_attempt_at)
+            VALUES (diet.current_user_id(), 'garmin', now())
+            ON CONFLICT (user_id, connector) DO UPDATE SET last_attempt_at = now()
+              WHERE diet.sync_state.last_attempt_at IS NULL
+                 OR diet.sync_state.last_attempt_at < now() - make_interval(secs => %s)
+            RETURNING 1""", (min_gap_seconds,))
+        return cur.fetchone() is not None
+
+
+def credential_for(user_id) -> dict | None:
+    """The account's own stored Garmin session. RLS scopes it; no owner needed."""
+    with db.user_tx(user_id) as cur:
+        cur.execute("""SELECT secret_ciphertext, key_id FROM diet.garmin_credentials
+                       WHERE user_id = diet.current_user_id()""")
+        return cur.fetchone()
 
 
 def _record(user_id, *, ok: bool, error: str | None) -> None:
@@ -126,12 +156,21 @@ def _write_readings(user_id, tz: ZoneInfo, day: date,
     return stored, rejected
 
 
-def poll_user(settings, account: dict, days: int, raw_root: Path | None) -> tuple[int, list[str]]:
+class RateLimited(RuntimeError):
+    """Garmin asked us to stop. Distinct so the loop can back off rather than retry."""
+
+
+def poll_user(account: dict, days: int, raw_root: Path | None) -> tuple[int, list[str]]:
     user_id = account["user_id"]
     tz = ZoneInfo(account["timezone"])
     token_json = secretbox.decrypt(account["secret_ciphertext"], account["key_id"])
 
-    api = garmin.resume(token_json)
+    try:
+        api = garmin.resume(token_json)
+    except Exception as exc:
+        if garmin.is_rate_limited(exc):
+            raise RateLimited(str(exc)) from exc
+        raise
     total, rejected = 0, []
     today = datetime.now(tz).date()
     raw_dir = (raw_root / account["email"]) if raw_root else None
@@ -155,7 +194,7 @@ def poll_user(settings, account: dict, days: int, raw_root: Path | None) -> tupl
 
     refreshed = garmin.session_tokens(api)
     if refreshed and refreshed != token_json:
-        _store_tokens(settings, user_id, refreshed)
+        _store_tokens(user_id, refreshed)
         log.info("garmin: refreshed session tokens for %s", account["email"])
     return total, rejected
 
@@ -189,7 +228,9 @@ def check_status(max_age: int) -> int:
     return 0
 
 
-def run_once(settings, args, raw_root: Path | None) -> int:
+def run_once(settings, args, raw_root: Path | None, days: int | None = None) -> int:
+    """One pass over every account. `days` overrides the configured window."""
+    window = args.days if days is None else days
     prune_raw(raw_root, args.keep_raw_days)
     accounts = _accounts(settings, args.user)
     if not accounts:
@@ -200,15 +241,29 @@ def run_once(settings, args, raw_root: Path | None) -> int:
 
     db.open_pool(settings.database_url, max_size=4)
     failures = 0
+    rate_limited = False
     try:
         for account in accounts:
             email = account["email"]
             try:
-                stored, rejected = poll_user(settings, account, args.days, raw_root)
+                if not claim(account["user_id"]):
+                    log.info("garmin: %s skipped, a sync is already in flight", email)
+                    continue
+                stored, rejected = poll_user(account, window, raw_root)
                 _record(account["user_id"], ok=True, error=None)
-                log.info("garmin: %s stored %d reading(s)%s", email, stored,
+                log.info("garmin: %s stored %d reading(s) over %d day(s)%s",
+                         email, stored, window,
                          f", {len(rejected)} rejected: {'; '.join(rejected[:4])}"
                          if rejected else "")
+            except RateLimited as exc:
+                failures += 1
+                rate_limited = True
+                message = f"Garmin rate-limited this IP: {exc}"[:400]
+                log.error("garmin: %s %s", email, message)
+                try:
+                    _record(account["user_id"], ok=False, error=message)
+                except Exception:
+                    log.exception("garmin: could not record rate limit for %s", email)
             except Exception as exc:
                 failures += 1
                 message = f"{type(exc).__name__}: {exc}"[:400]
@@ -223,8 +278,9 @@ def run_once(settings, args, raw_root: Path | None) -> int:
     if failures:
         log.error("garmin: %d of %d account(s) failed", failures, len(accounts))
         _write_status(False, f"{failures}/{len(accounts)}-failed")
-        return 1
-    log.info("garmin: %d account(s) synced", len(accounts))
+        # 2 means "back off", distinct from 1 so the loop can tell them apart.
+        return 2 if rate_limited else 1
+    log.info("garmin: %d account(s) synced over %d day(s)", len(accounts), window)
     _write_status(True, f"{len(accounts)}-synced")
     return 0
 
@@ -271,15 +327,27 @@ def main() -> int:
     ap.add_argument("--loop", action="store_true",
                     default=os.environ.get("GARMIN_POLL_LOOP", "").lower() in {"1","true","yes"},
                     help="stay running and poll on an interval (sidecar mode)")
-    ap.add_argument("--interval", type=int,
-                    default=int(os.environ.get("GARMIN_POLL_INTERVAL", "3600")),
-                    help="seconds between cycles in --loop mode")
+    # GARMIN_POLL_INTERVAL was the single interval before the split; honoured as
+    # the large one so an existing .env keeps working.
+    _legacy = os.environ.get("GARMIN_POLL_INTERVAL")
+    ap.add_argument("--small-days", type=int,
+                    default=int(os.environ.get("GARMIN_POLL_SMALL_DAYS", "1")),
+                    help="days fetched by the frequent cycle; 1 means today only")
+    ap.add_argument("--interval-small", type=int,
+                    default=int(os.environ.get("GARMIN_POLL_INTERVAL_SMALL", "900")),
+                    help="seconds between today-only cycles in --loop mode")
+    ap.add_argument("--interval-large", type=int,
+                    default=int(os.environ.get("GARMIN_POLL_INTERVAL_LARGE", _legacy or "7200")),
+                    help="seconds between full-window cycles in --loop mode")
+    ap.add_argument("--backoff", type=int,
+                    default=int(os.environ.get("GARMIN_BACKOFF_SECONDS", "1800")),
+                    help="seconds to stop polling for after Garmin returns 429")
     ap.add_argument("--healthcheck", action="store_true",
                     help="exit 0 if the last cycle succeeded recently; for the container healthcheck")
     args = ap.parse_args()
 
     if args.healthcheck:
-        return check_status(args.interval * 3 + 600)
+        return check_status(args.interval_small * 3 + 600)
     if args.once:
         args.loop = False
 
@@ -299,19 +367,51 @@ def main() -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
 
-    log.info("poller loop starting; every %ds, %d day window", args.interval, args.days)
-    while not stopping:
+    # Two cadences. Today changes through the day, so it is polled often and
+    # cheaply; the trailing window exists to catch Garmin's late arrivals and
+    # revisions, which do not need checking every quarter hour. Fetching the
+    # full window at the short interval would multiply the request count
+    # against an API that has already rate-limited this deployment.
+    def cycle(window: int, label: str) -> int:
         try:
-            run_once(settings, args, raw_root)
+            return run_once(settings, args, raw_root, days=window)
         except Exception:
             # A crash must not end the loop; the status file records it.
-            log.exception("garmin: cycle raised")
+            log.exception("garmin: %s cycle raised", label)
             _write_status(False, "cycle-crashed")
+            return 1
+
+    def jitter(interval: float) -> float:
+        # So restarts do not synchronise onto Garmin at the same instant.
+        return random.uniform(0, min(60.0, interval * 0.1))
+
+    log.info("poller loop starting; today every %ds, %d-day window every %ds",
+             args.interval_small, args.days, args.interval_large)
+
+    now = time.monotonic()
+    next_large, next_small = now, now + args.interval_small
+    backoff_until = 0.0
+
+    while not stopping:
+        now = time.monotonic()
+        if now >= backoff_until:
+            code = None
+            if now >= next_large:
+                code = cycle(args.days, "full")
+                next_large = now + args.interval_large + jitter(args.interval_large)
+                # The full pass covered today, so the next short one can wait.
+                next_small = now + args.interval_small + jitter(args.interval_small)
+            elif now >= next_small:
+                code = cycle(args.small_days, "today")
+                next_small = now + args.interval_small + jitter(args.interval_small)
+            if code == 2:
+                # Retrying into a rate limit only deepens it.
+                backoff_until = time.monotonic() + args.backoff
+                log.warning("garmin: rate-limited; pausing all polling for %ds", args.backoff)
         if stopping:
             break
-        # Jitter so restarts do not synchronise onto Garmin at the same instant.
-        delay = args.interval + random.uniform(0, min(60, args.interval * 0.1))
-        for _ in range(int(delay)):
+        wake = max(backoff_until, min(next_small, next_large))
+        for _ in range(max(1, int(wake - time.monotonic()))):
             if stopping:
                 break
             time.sleep(1)

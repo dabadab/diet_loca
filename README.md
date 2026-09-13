@@ -201,9 +201,23 @@ docker compose exec app python -m app.manage garmin-forget <email>
 docker compose logs -f poller
 ```
 
-The poller re-fetches a trailing window (`GARMIN_POLL_DAYS`, default 3) every
-`GARMIN_POLL_INTERVAL` seconds. The overlap is deliberate: sleep lands late and
-Garmin revises figures, and measurements upsert so re-fetching costs nothing.
+The poller runs two cadences. **Today** is fetched every
+`GARMIN_POLL_INTERVAL_SMALL` (default 15 min), because it changes through the
+day. The **trailing window** (`GARMIN_POLL_DAYS`, default 3) is fetched every
+`GARMIN_POLL_INTERVAL_LARGE` (default 2 h); its overlap is deliberate, since
+sleep lands late and Garmin revises figures, and measurements upsert so
+re-fetching costs nothing.
+
+Each day costs three requests, so at the defaults one account is roughly 288
+requests a day for today plus 108 for the window. That is more than enough to
+meet an undocumented rate limit, so a 429 stops **all** polling for
+`GARMIN_BACKOFF_SECONDS` (default 30 min) rather than retrying into it.
+
+**Sync now** on the web page pulls immediately over the full window. It takes
+the same claim the sidecar does, so the two can never talk to Garmin at once.
+
+A failing sync shows as a banner on every tab, not only under System — it is
+why the numbers are wrong, and you should not have to go looking.
 
 Because a sidecar has no exit code for anyone to read, a failed cycle makes the
 container **unhealthy** — `docker compose ps` shows it — and per-account

@@ -201,6 +201,20 @@ def fetch_day(api: Any, day: date_cls, raw_dir: Path | None = None) -> tuple[dic
     return daily, sleep
 
 
+def is_rate_limited(exc: BaseException) -> bool:
+    """
+    Whether Garmin is telling us to slow down.
+
+    Matched by name and message rather than by importing the exception: the
+    Garmin stack is imported lazily so the web app does not pull it in, and the
+    library has renamed these before.
+    """
+    name = type(exc).__name__
+    text = str(exc).lower()
+    return ("TooManyRequests" in name or "429" in text
+            or "rate limit" in text or "too many" in text)
+
+
 def days_back(today: date_cls, n: int) -> Iterable[date_cls]:
     """
     Trailing window, newest first.

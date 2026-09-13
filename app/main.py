@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from datetime import date as date_cls, datetime, timezone as dt_timezone
 from zoneinfo import ZoneInfo
 
@@ -316,6 +317,44 @@ def day_detail(day: str, user: auth.User = Depends(current_user)):
         raise HTTPException(400, "date must be YYYY-MM-DD") from None
     with db.user_tx(user.user_id) as cur:
         return queries.day_detail(cur, when)
+
+
+@app.post("/api/garmin/sync")
+def garmin_sync(user: auth.User = Depends(current_user)):
+    """
+    Pull from Garmin now, rather than waiting for the poller's next cycle.
+
+    Takes the same claim the sidecar does, so the two cannot both be talking to
+    Garmin at once and cannot both spend requests against a rate limit. Runs
+    synchronously -- it is a handful of seconds and the caller wants the answer,
+    not a job id.
+    """
+    from . import poller  # imported here so the web app does not pull the
+                          # Garmin stack in at startup
+
+    cred = poller.credential_for(user.user_id)
+    if cred is None:
+        raise HTTPException(400, "no_garmin_session")
+    if not poller.claim(user.user_id):
+        raise HTTPException(409, "sync_already_running")
+
+    account = {"user_id": user.user_id, "email": user.email,
+               "timezone": user.timezone, **cred}
+    raw_root = Path(settings.garmin_raw_dir) / user.email if settings.garmin_raw_dir else None
+    try:
+        stored, rejected = poller.poll_user(account, settings.garmin_poll_days, raw_root)
+    except poller.RateLimited as exc:
+        message = f"Garmin rate-limited this IP: {exc}"[:300]
+        poller._record(user.user_id, ok=False, error=message)
+        raise HTTPException(429, message) from None
+    except Exception as exc:
+        message = f"{type(exc).__name__}: {exc}"[:300]
+        log.exception("manual garmin sync failed for %s", user.email)
+        poller._record(user.user_id, ok=False, error=message)
+        raise HTTPException(502, message) from None
+
+    poller._record(user.user_id, ok=True, error=None)
+    return {"stored": stored, "rejected": rejected, "days": settings.garmin_poll_days}
 
 
 @app.get("/api/status")
