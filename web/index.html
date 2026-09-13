@@ -150,7 +150,10 @@
     margin-bottom: 14px; padding: 10px 12px; background: var(--paper);
     border: 1px dashed var(--ink-soft); border-radius: 4px; flex-wrap: wrap;
   }
-  .expenditure-row .label { color: var(--ink-soft); flex: 1; }
+  /* No flex:1 -- that was for the single long label this row used to have, and
+     with several it hands each one a share of the slack, spacing them raggedly. */
+  .expenditure-row .label { color: var(--ink-soft); }
+  .expenditure-row .label.trailing { margin-left: auto; }
   .expenditure-row .figure { font-weight: 600; }
 
   .balance-line {
@@ -517,36 +520,36 @@ function passiveAverage() {
 }
 
 function energyRow(d) {
+  // Same three fields in the same order every day. Today's out and balance are
+  // projected rather than measured -- passive burn for the whole day plus the
+  // activity done so far -- because the raw figures read as a large surplus
+  // until evening. Marked, not relabelled, so the row stays comparable.
   const isToday = state.days.length && d.date === state.days[0].date;
-  const bal = (inK, outK) => {
-    const v = inK - outK;
-    return `<span class="figure ${v <= 0 ? "neg" : "pos"}">${v > 0 ? "+" : ""}${n0(v)} kcal</span>`;
-  };
+  let out = d.energy_out_kcal, projected = null;
 
-  if (isToday) {
+  if (isToday && d.energy_out_partial) {
     const passive = passiveAverage();
-    if (passive != null && d.energy_in_kcal != null) {
-      const out = passive + (d.active_kcal || 0);
-      return `
-        <div class="expenditure-row">
-          <span class="label">projected balance</span>
-          ${bal(d.energy_in_kcal, out)}
-          <span class="label" style="flex:0 0 auto">passive ${n0(passive)} ·
-            active so far ${n0(d.active_kcal || 0)}</span>
-        </div>`;
+    if (passive != null) {
+      out = passive + (d.active_kcal || 0);
+      projected = `passive ${n0(passive)} averaged from recent days `
+                + `+ active ${n0(d.active_kcal || 0)} so far`;
     }
   }
 
+  const bal = d.energy_in_kcal != null && out != null ? d.energy_in_kcal - out : null;
   const parts = [];
-  if (d.energy_out_kcal != null) parts.push(`<span class="label">out</span>
-    <span class="figure">${n0(d.energy_out_kcal)} kcal</span>`);
-  if (d.energy_in_kcal != null && d.energy_out_kcal != null)
-    parts.push(`<span class="label">balance</span>${bal(d.energy_in_kcal, d.energy_out_kcal)}`);
+  if (out != null) parts.push(`<span class="label">out</span>
+    <span class="figure">${n0(out)} kcal</span>`);
+  if (bal != null) parts.push(`<span class="label">balance</span>
+    <span class="figure ${bal <= 0 ? "neg" : "pos"}">${bal > 0 ? "+" : ""}${n0(bal)} kcal</span>`);
   if (d.weight_kg != null) parts.push(`<span class="label">weight</span>
     <span class="figure">${n1(d.weight_kg)} kg</span>`);
+
   if (!parts.length) return `<div class="expenditure-row">
     <span class="label">nothing measured for this day</span></div>`;
-  return `<div class="expenditure-row">${parts.join("")}</div>`;
+  return `<div class="expenditure-row"${projected ? ` title="${esc(projected)}"` : ""}>
+    ${parts.join("")}
+    ${projected ? '<span class="label trailing">projected</span>' : ""}</div>`;
 }
 
 function mealsHtml(detail) {
