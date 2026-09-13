@@ -23,6 +23,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import date as date_cls
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
@@ -199,6 +200,199 @@ def fetch_day(api: Any, day: date_cls, raw_dir: Path | None = None) -> tuple[dic
             # Losing the archive must not lose the run.
             log.warning("garmin: could not write raw payload for %s: %s", cdate, exc)
     return daily, sleep
+
+
+# --- activities ------------------------------------------------------------
+# A workout, unlike a daily metric, is an interval with a dozen correlated
+# fields. The whole window comes back in one request, so this costs one call
+# per poll however many activities are in it.
+
+# Coordinates ride along in the list item. They are a location trace, they have
+# nothing to do with diet, and the stored `raw` is readable by diet_ro -- the
+# role behind the model-facing query_sql -- so they are dropped on the way in.
+LOCATION_KEYS = frozenset({
+    "startLatitude", "startLongitude", "endLatitude", "endLongitude",
+})
+
+
+def _strip_location(item: dict) -> dict:
+    return {k: v for k, v in item.items()
+            if k not in LOCATION_KEYS and "olyline" not in k}
+
+
+@dataclass(frozen=True)
+class FieldSpec:
+    """MetricSpec's idea applied to a column instead of a reading: several
+    candidate paths, because Garmin has renamed these before."""
+    column: str
+    paths: Sequence[str]
+    convert: Callable[[Any], Any] = float
+
+    def read(self, item: dict) -> Any:
+        for path in self.paths:
+            raw = _dig(item, path)
+            if raw is None:
+                continue
+            try:
+                return self.convert(raw)
+            except (TypeError, ValueError):
+                log.warning("garmin: activity %s at %s was %r, unusable",
+                            self.column, path, raw)
+        return None
+
+
+ACTIVITY_SPECS: tuple[FieldSpec, ...] = (
+    FieldSpec("name", ("activityName",), convert=lambda v: str(v)[:300] or None),
+    FieldSpec("duration_s", ("duration", "elapsedDuration")),
+    FieldSpec("moving_s", ("movingDuration",)),
+    FieldSpec("distance_m", ("distance",)),
+    FieldSpec("kcal", ("calories",)),
+    FieldSpec("avg_hr", ("averageHR",)),
+    FieldSpec("max_hr", ("maxHR",)),
+    FieldSpec("elevation_gain_m", ("elevationGain",)),
+    FieldSpec("avg_speed_mps", ("averageSpeed",)),
+    FieldSpec("training_effect_aerobic", ("aerobicTrainingEffect",)),
+    FieldSpec("training_effect_anaerobic", ("anaerobicTrainingEffect",)),
+)
+
+
+def _parse_gmt(value: Any) -> datetime | None:
+    """Garmin's 'YYYY-MM-DD HH:MM:SS', which is UTC despite carrying no zone."""
+    if not isinstance(value, str):
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
+        try:
+            return datetime.strptime(value.rstrip("Z"), fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def extract_activity(item: Any) -> dict | None:
+    """
+    One list item to one row, or None if it cannot be identified.
+
+    activityId, a start time and a type are the row's identity; without all
+    three there is nothing useful to store, so the item is skipped rather than
+    stored half-formed. Everything else is optional by design.
+    """
+    if not isinstance(item, dict):
+        return None
+    external_id = item.get("activityId")
+    started_at = _parse_gmt(item.get("startTimeGMT"))
+    activity_type = _dig(item, "activityType.typeKey") or item.get("activityTypeKey")
+    if external_id is None or started_at is None or not activity_type:
+        log.warning("garmin: skipping activity with no id/start/type: %s",
+                    ", ".join(sorted(item)[:10]) if isinstance(item, dict) else item)
+        return None
+
+    row: dict[str, Any] = {
+        "external_id": str(external_id),
+        "started_at": started_at,
+        "activity_type": str(activity_type)[:100],
+        "raw": _strip_location(item),
+    }
+    for spec in ACTIVITY_SPECS:
+        row[spec.column] = spec.read(item)
+    return row
+
+
+def fetch_activities(api: Any, start: date_cls, end: date_cls,
+                     raw_dir: Path | None = None) -> list[dict]:
+    """
+    Every activity in a date window, in one request.
+
+    An outage here must not cost the day's measurements, so a failure is logged
+    and returns nothing rather than propagating.
+    """
+    try:
+        items = api.get_activities_by_date(start.isoformat(), end.isoformat())
+    except Exception as exc:
+        if is_rate_limited(exc):
+            raise
+        log.warning("garmin: activities for %s..%s failed: %s", start, end, exc)
+        return []
+    if not isinstance(items, list):
+        log.warning("garmin: activities for %s..%s returned %s, not a list",
+                    start, end, type(items).__name__)
+        return []
+
+    if raw_dir is not None:
+        try:
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            (raw_dir / f"activities-{start}_{end}.json").write_text(
+                json.dumps([_strip_location(i) for i in items if isinstance(i, dict)],
+                           indent=2, default=str))
+        except OSError as exc:
+            log.warning("garmin: could not write raw activities for %s..%s: %s",
+                        start, end, exc)
+    return items
+
+
+# Garmin's own key names for a zone bucket, mapped to what gets stored. The
+# library does not parse these, so they are confirmed against a real response
+# rather than trusted: a key that is missing is left out, never invented.
+_ZONE_KEYS = (("zone", ("zoneNumber",)),
+              ("secs", ("secsInZone",)),
+              ("kcal", ("zoneCalories",)))
+
+
+def _zone_rows(payload: Any, boundary_key: str) -> list[dict] | None:
+    if not isinstance(payload, list) or not payload:
+        return None
+    out = []
+    for bucket in payload:
+        if not isinstance(bucket, dict):
+            continue
+        row: dict[str, Any] = {}
+        for name, candidates in _ZONE_KEYS:
+            for c in candidates:
+                if bucket.get(c) is not None:
+                    row[name] = bucket[c]
+                    break
+        if bucket.get("zoneLowBoundary") is not None:
+            row[boundary_key] = bucket["zoneLowBoundary"]
+        if row:
+            out.append(row)
+    return out or None
+
+
+def fetch_zones(api: Any, external_id: str, *,
+                power: bool) -> tuple[list[dict] | None, list[dict] | None, bool]:
+    """
+    Time-in-zone for one activity: the intensity distribution the summary lacks.
+
+    Returns (hr, power, answered). `answered` is the important one: an activity
+    with no heart-rate strap legitimately has no zones, and a request that
+    failed also produces none, and the caller must tell those apart -- the first
+    should never be asked about again, the second should be retried. Without
+    that flag one Garmin hiccup would mark the activity permanently zoneless.
+
+    Power is asked for only when the summary reported one, since most activities
+    have no meter and asking anyway doubles the cost for nothing. A rate limit
+    propagates -- that is the whole reason the backfill is budgeted -- but any
+    other failure is swallowed so the activities already fetched this pass are
+    not lost with it.
+    """
+    hr = pw = None
+    answered = True
+    try:
+        hr = _zone_rows(api.get_activity_hr_in_timezones(external_id), "low_hr")
+    except Exception as exc:
+        if is_rate_limited(exc):
+            raise
+        log.warning("garmin: HR zones for activity %s failed: %s", external_id, exc)
+        answered = False
+    if power:
+        try:
+            pw = _zone_rows(api.get_activity_power_in_timezones(external_id), "low_w")
+        except Exception as exc:
+            if is_rate_limited(exc):
+                raise
+            log.warning("garmin: power zones for activity %s failed: %s",
+                        external_id, exc)
+            answered = False
+    return hr, pw, answered
 
 
 def is_rate_limited(exc: BaseException) -> bool:

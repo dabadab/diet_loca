@@ -199,10 +199,16 @@ def correct_meal(meal_id: str, description: str | None = None,
 @mcp.tool
 def get_day(date: str | None = None) -> dict:
     """
-    Everything recorded for one day: meals with their items, and measurements.
+    Everything recorded for one day: meals with their items, measurements, and
+    activities.
 
     `date` is YYYY-MM-DD in the user's own timezone and defaults to today.
     Superseded meals are not included — you see the current version only.
+
+    Activities are context for the day's energy figures, not an addition to
+    them: an activity's `kcal` is ALREADY counted inside the day's
+    `active_kcal` measurement. Never add activity calories to energy
+    expenditure — doing so double-counts every day with training on it.
     """
     user_id, tz = _identity()
     with db.user_tx(user_id) as cur:
@@ -230,6 +236,37 @@ def get_range(from_date: str | None = None, to_date: str | None = None,
     except ValueError as exc:
         raise ToolError(str(exc)) from None
     return {"from": start.isoformat(), "to": end.isoformat(), "measurements": rows}
+
+
+@mcp.tool
+def get_activities(from_date: str | None = None, to_date: str | None = None,
+                   activity_type: str | None = None) -> dict:
+    """
+    Workouts recorded by the fitness tracker over a date range, newest first.
+
+    Each one carries duration, distance, calories, average and maximum heart
+    rate, elevation, speed and training effect — plus `hr_zones` (and
+    `power_zones` where a meter was used), the seconds and calories spent in
+    each intensity zone. Zones are filled in by a background sync, so a workout
+    from the last hour or two may not have them yet.
+
+    An activity's `kcal` is ALREADY included in that day's `active_kcal`
+    measurement from `get_range`. Use activities to explain what the day's
+    expenditure consisted of — never add them to it.
+
+    Dates are YYYY-MM-DD in the user's timezone; the default range is the last
+    14 days. `activity_type` is the tracker's own key, such as `running`,
+    `cycling` or `strength_training`; call without it first to see which types
+    this user actually records rather than guessing at one.
+    """
+    user_id, tz = _identity()
+    end = _parse_date(to_date, tz)
+    start = _parse_date(from_date, tz) if from_date else end - timedelta(days=13)
+    if start > end:
+        raise ToolError("from_date is after to_date")
+    with db.user_tx(user_id) as cur:
+        rows = queries.activities_range(cur, start, end, activity_type or None)
+    return {"from": start.isoformat(), "to": end.isoformat(), "activities": rows}
 
 
 @mcp.tool
@@ -313,8 +350,8 @@ def query_sql(sql: str) -> dict:
     the identity tables at all. Row-level security still applies, so you can
     only ever read this user's rows — write the query as if the tables held
     their data alone. Tables: diet.meals, diet.meal_items, diet.measurements,
-    diet.sync_state, diet.targets. Single SELECT (or WITH) statement, at most
-    500 rows returned.
+    diet.activities, diet.sync_state, diet.targets. Single SELECT (or WITH)
+    statement, at most 500 rows returned.
     """
     if not db.ro_pool_ready():
         raise ToolError("ad-hoc SQL is not available on this server "

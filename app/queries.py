@@ -171,6 +171,10 @@ def day_detail(cur, local_date) -> dict:
         "date": str(local_date),
         "meals": meals,
         "measurements": measurements,
+        # Context only. Their calories are already counted inside the day's
+        # active_kcal measurement, so energy_in_kcal below does not touch them
+        # and nothing downstream may add them to expenditure.
+        "activities": activities_on(cur, local_date),
         "energy_in_kcal": round(sum(m["kcal"] for m in meals)) if meals else None,
         "target_kcal": tgt["kcal"] if tgt else None,
         "target_protein_g": float(tgt["protein_g"]) if tgt else None,
@@ -285,3 +289,51 @@ def targets_list(cur) -> list[dict]:
              "protein_g": float(r["protein_g"]),
              "note": r["note"],
              "set_at": r["created_at"].isoformat()} for r in cur.fetchall()]
+
+
+# ---------------------------------------------------------- activities ----
+# Workouts, as context for a day's energy figures. Their calories are already
+# inside the day's active_kcal, so nothing here may be summed into expenditure.
+
+_ACTIVITY_SQL = """
+    SELECT external_id, started_at, local_date, activity_type, name,
+           duration_s, moving_s, distance_m, kcal, avg_hr, max_hr,
+           elevation_gain_m, avg_speed_mps,
+           training_effect_aerobic, training_effect_anaerobic,
+           hr_zones, power_zones
+    FROM diet.activities
+"""
+
+# raw is deliberately not projected: it is an archive for re-deriving a field
+# that was never promoted to a column, not something to push through a response.
+_ACTIVITY_NUMERIC = ("duration_s", "moving_s", "distance_m", "kcal", "avg_hr",
+                     "max_hr", "elevation_gain_m", "avg_speed_mps",
+                     "training_effect_aerobic", "training_effect_anaerobic")
+
+
+def _activity_row(r) -> dict:
+    row = dict(r)
+    row["started_at"] = row["started_at"].isoformat()
+    row["local_date"] = row["local_date"].isoformat()
+    for k in _ACTIVITY_NUMERIC:
+        if row[k] is not None:
+            row[k] = float(row[k])
+    return row
+
+
+def activities_on(cur, local_date) -> list[dict]:
+    """One day's workouts, in the order they happened."""
+    cur.execute(_ACTIVITY_SQL + " WHERE local_date = %(d)s ORDER BY started_at",
+                {"d": local_date})
+    return [_activity_row(r) for r in cur.fetchall()]
+
+
+def activities_range(cur, from_date, to_date, activity_type=None) -> list[dict]:
+    """Workouts over a date range, newest first, optionally one type only."""
+    cur.execute(
+        _ACTIVITY_SQL + """
+         WHERE local_date BETWEEN %(a)s AND %(b)s
+           AND (%(t)s::text IS NULL OR activity_type = %(t)s)
+         ORDER BY started_at DESC""",
+        {"a": from_date, "b": to_date, "t": activity_type})
+    return [_activity_row(r) for r in cur.fetchall()]

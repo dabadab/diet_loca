@@ -36,6 +36,7 @@ class Settings:
     mcp_public_url: str
     garmin_stale_after_hours: int
     garmin_poll_days: int
+    garmin_zone_budget: int
     garmin_raw_dir: str
     pool_max_size: int
     mcp_enabled: bool
@@ -93,6 +94,9 @@ def load() -> Settings:
         garmin_stale_after_hours=int(os.environ.get("GARMIN_STALE_AFTER_HOURS", "24")),
         # The window a manual sync from the web UI covers, matching the poller.
         garmin_poll_days=int(os.environ.get("GARMIN_POLL_DAYS", "3")),
+        # Zone lookups cost one request per activity, so the large poll cycle
+        # backfills at most this many per pass. 0 disables them entirely.
+        garmin_zone_budget=int(os.environ.get("GARMIN_ZONE_BUDGET", "10")),
         garmin_raw_dir=os.environ.get("GARMIN_RAW_DIR", ""),
         pool_max_size=int(os.environ.get("POOL_MAX_SIZE", "10")),
         mcp_enabled=_flag("MCP_ENABLED", True),

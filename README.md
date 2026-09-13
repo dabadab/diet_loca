@@ -108,8 +108,15 @@ itself.
 
 ## MCP
 
-Eight tools at `POST /mcp`: `log_meal`, `correct_meal`, `get_day`, `get_range`,
-`get_targets`, `set_target`, `clear_target`, `query_sql`.
+Nine tools at `POST /mcp`: `log_meal`, `correct_meal`, `get_day`, `get_range`,
+`get_activities`, `get_targets`, `set_target`, `clear_target`, `query_sql`.
+
+`get_activities` returns Garmin workouts with their duration, distance,
+calories, heart rate and time-in-zone breakdown, and `get_day` lists the day's
+alongside its meals. Their calories are **already counted** inside the day's
+`active_kcal`, so they explain what the day's expenditure consisted of rather
+than adding to it — both docstrings say so, because it is the mistake the data
+invites.
 
 Targets are effective-dated — set from a date, applying until a later one
 supersedes it — so asking Claude to "set 1800 kcal from the 1st" re-scores
@@ -208,8 +215,14 @@ day. The **trailing window** (`GARMIN_POLL_DAYS`, default 3) is fetched every
 sleep lands late and Garmin revises figures, and measurements upsert so
 re-fetching costs nothing.
 
-Each day costs three requests, so at the defaults one account is roughly 288
-requests a day for today plus 108 for the window. That is more than enough to
+Activities come along on both cadences for **one extra request per pass** —
+a whole window arrives in a single call. Their time-in-zone breakdown costs a
+request per workout, so it is fetched once per activity and never again, on the
+large cycle only, at most `GARMIN_ZONE_BUDGET` (default 10, `0` to disable) per
+pass; in steady state that is about one extra request a day.
+
+Each day costs four requests, so at the defaults one account is roughly 384
+requests a day for today plus 144 for the window. That is more than enough to
 meet an undocumented rate limit, so a 429 stops **all** polling for
 `GARMIN_BACKOFF_SECONDS` (default 30 min) rather than retrying into it.
 

@@ -62,13 +62,19 @@ Claude Code, over this service's own OAuth — and both readable in the browser.
 Implemented in `app/schema.sql`, which is the whole database: roles, tables,
 policies, grants. It is idempotent, so it doubles as the migration.
 
-Three core tables, deliberately separating *measured* data from *estimated* data
+Four core tables, deliberately separating *measured* data from *estimated* data
 rather than sharing columns:
 
 - `measurements(user_id, ts_utc, local_date, source, metric, value, unit, external_id)`
   — Garmin metrics (weight, resting HR, sleep, steps, active kcal). Unique on
   `(user_id, source, metric, external_id)`; upsert, never plain insert, because
   Garmin backfills and revises.
+- `activities(user_id, started_at, local_date, source, external_id, activity_type,
+  duration_s, distance_m, kcal, avg_hr, hr_zones jsonb, power_zones jsonb, raw jsonb, …)`
+  — Garmin workouts. Not rows in `measurements`: a measurement is one scalar at
+  one instant, an activity is an interval whose dozen fields are only meaningful
+  together. Same upsert identity rule, because Garmin reprocesses HR and lets
+  people rename a workout afterwards.
 - `meals(user_id, eaten_at, local_date, description, raw_analysis jsonb, source)`
   — `raw_analysis` stores Claude's full output verbatim so reparsing later
     doesn't require re-asking the user.
@@ -172,6 +178,16 @@ Built, in `app/garmin.py`, `app/poller.py` and `app/secretbox.py`:
   rest of the day with it.
 - **A failed account costs only that account.** Outcomes land per user in
   `diet.sync_state`, which is what the status panel already reads.
+- **Activity calories are never summed into expenditure.** Garmin's daily
+  summary already counts them inside `active_kcal`, so adding them would
+  double-count exactly the days with training on them — the same class of error
+  as scoring a Garmin-only day as zero intake, or comparing every logged day
+  against targets over only the days that had one. Activities are *context for*
+  the day's energy figures, never an *input to* them. The rule is written into
+  the schema comment, `queries.day_detail`, and both tool docstrings, because it
+  is the thing a later change will get wrong. Enforced structurally too:
+  `queries._DAYS_SQL`, which backs the whole energy view, does not reference
+  `diet.activities` at all.
 - **The session, not the password, is stored.** `manage.py garmin-login` uses
   the password once, interactively, handles MFA, and keeps only the token blob,
   Fernet-encrypted with the key in a file outside the database. A dump of
@@ -185,6 +201,34 @@ interval would multiply requests against an API that has already rate-limited
 this deployment; a 429 now stops all polling for a backoff period rather than
 retrying into it. A conditional UPDATE of `sync_state.last_attempt_at` is the
 claim that stops the sidecar and the web page's **Sync now** button colliding.
+
+Activities ride the same two cadences at **one extra request per pass**:
+`get_activities_by_date(start, end)` returns a whole window in a single call,
+however many workouts are in it, so the small cycle asks for today and the large
+one for the configured window.
+
+Time-in-zone is the one thing the list response does not carry, and it costs a
+request *per activity*. So it is fetched **once per activity, ever** — zones do
+not change after Garmin has processed a workout — as a backlog drain keyed on
+`zones_fetched_at IS NULL`, on the large cycle only, capped at
+`GARMIN_ZONE_BUDGET` (10) per pass. Power zones are requested only when the
+summary reported `avgPower`, since most activities have no meter. Steady state
+is roughly one extra request a day.
+
+Two distinctions that look pedantic and are not. A zone fetch reports whether it
+was *answered*, because an activity recorded without a heart-rate strap
+legitimately has no zones and a failed request also produces none: the first
+must never be asked about again, the second must be retried. And `zone_attempts`
+is incremented *before* the request, so three transient failures become terminal
+instead of an unbounded retry loop against an endpoint that rate-limits.
+
+Deeper per-activity endpoints — splits, exercise sets, weather, gear, and the
+per-second chart and GPS polyline behind `get_activity_details` — are
+deliberately not fetched: each costs a request per activity and none of them
+answers a question a diet log asks. The full summary is kept verbatim in `raw`,
+so that decision is reversible without re-fetching. Coordinates are stripped
+from `raw` on the way in: they are a location trace with no bearing on diet, and
+`diet_ro` — the role behind the model-facing `query_sql` — can read that column.
 
 It runs as a sidecar container rather than the systemd timer originally planned.
 That trade needed compensating for: a restarting container has no exit code for
@@ -234,8 +278,11 @@ Built, on FastMCP 4, and verified against Postgres 13 and 17:
   parse are both kept; `raw_analysis` holds the estimate verbatim
 - `correct_meal(meal_id, ...)` — append-only; returns the new id, refuses a meal
   that has already been corrected and points at the current head
-- `get_day(date?)` — meals with items plus that day's measurements
+- `get_day(date?)` — meals with items, that day's measurements, and its activities
 - `get_range(from?, to?, metrics[]?)` — measured series only
+- `get_activities(from?, to?, activity_type?)` — workouts with their intensity
+  zones; the docstring says outright that their calories are already inside
+  `active_kcal` and must not be added to expenditure
 - `query_sql(sql)` — separate **read-only** Postgres role, RLS still applies
 
 Two things the testing changed. The `SELECT`-prefix check on `query_sql` is not

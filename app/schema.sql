@@ -418,6 +418,75 @@ DROP TRIGGER IF EXISTS measurements_local_date ON diet.measurements;
 CREATE TRIGGER measurements_local_date BEFORE INSERT OR UPDATE ON diet.measurements
   FOR EACH ROW EXECUTE FUNCTION diet.set_local_date('ts_utc');
 
+-- ---------------------------------------------------------- activities ----
+-- Workouts from Garmin. Deliberately not rows in measurements: a measurement
+-- is one scalar at one instant, an activity is an interval with a dozen
+-- correlated fields that are only meaningful together.
+--
+-- CRITICAL: activity kcal is NOT expenditure to be added to anything. Garmin's
+-- daily summary already counts these calories inside active_kcal, so summing
+-- activities into energy out double-counts exactly the days with training on
+-- them. Activities are context for the day's energy figures, never an input.
+
+CREATE TABLE IF NOT EXISTS diet.activities (
+  activity_id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  user_id       uuid NOT NULL REFERENCES auth.users(user_id) ON DELETE CASCADE,
+  source        diet.provenance NOT NULL,
+  external_id   text NOT NULL,          -- Garmin activityId
+  started_at    timestamptz NOT NULL,
+  local_date    date NOT NULL,
+  activity_type text NOT NULL CHECK (length(activity_type) BETWEEN 1 AND 100),
+  name          text CHECK (name IS NULL OR length(name) BETWEEN 1 AND 300),
+  -- Every measured field is nullable: a pool swim has no elevation, a strength
+  -- session has no distance, and a field Garmin drops must land as NULL rather
+  -- than reject the row. The CHECKs are measurements_value_sane's idea -- catch
+  -- a wrong-by-a-factor-of-ten value, not enforce completeness.
+  duration_s    numeric(8,1)  CHECK (duration_s IS NULL OR duration_s BETWEEN 0 AND 172800),
+  moving_s      numeric(8,1)  CHECK (moving_s IS NULL OR moving_s BETWEEN 0 AND 172800),
+  distance_m    numeric(10,1) CHECK (distance_m IS NULL OR distance_m BETWEEN 0 AND 1000000),
+  kcal          numeric(6,0)  CHECK (kcal IS NULL OR kcal BETWEEN 0 AND 20000),
+  avg_hr        numeric(4,0)  CHECK (avg_hr IS NULL OR avg_hr BETWEEN 20 AND 250),
+  max_hr        numeric(4,0)  CHECK (max_hr IS NULL OR max_hr BETWEEN 20 AND 250),
+  elevation_gain_m numeric(7,1) CHECK (elevation_gain_m IS NULL OR elevation_gain_m BETWEEN 0 AND 30000),
+  avg_speed_mps numeric(6,3)  CHECK (avg_speed_mps IS NULL OR avg_speed_mps BETWEEN 0 AND 50),
+  training_effect_aerobic   numeric(3,1)
+    CHECK (training_effect_aerobic IS NULL OR training_effect_aerobic BETWEEN 0 AND 5),
+  training_effect_anaerobic numeric(3,1)
+    CHECK (training_effect_anaerobic IS NULL OR training_effect_anaerobic BETWEEN 0 AND 5),
+  -- Zone breakdowns cost one request each, so they are backfilled once per
+  -- activity and never re-fetched: they do not change after Garmin has
+  -- processed the workout. NULL zones with a non-NULL zones_fetched_at means
+  -- "asked, there were none" -- a pool swim has no power zones -- which is why
+  -- the timestamp exists rather than testing the jsonb for emptiness.
+  hr_zones      jsonb,   -- [{"zone":1,"secs":812.0,"low_hr":93,"kcal":104.0}, ...]
+  power_zones   jsonb,   -- same shape with "low_w"; cycling with a meter only
+  zones_fetched_at timestamptz,
+  zone_attempts smallint NOT NULL DEFAULT 0,
+  -- The summary verbatim, minus coordinates, so a field not promoted to a
+  -- column above can be recovered without re-fetching. Coordinates are stripped
+  -- on the way in: they are a location trace, they have nothing to do with
+  -- diet, and diet_ro -- the role behind the model-facing query_sql -- can read
+  -- this column.
+  raw           jsonb,
+  ingested_at   timestamptz NOT NULL DEFAULT now(),
+  -- Garmin revises activities after the fact (HR reprocessing, renames), so a
+  -- second sight of one must overwrite. Same identity rule as measurements.
+  UNIQUE (user_id, source, external_id)
+);
+
+CREATE INDEX IF NOT EXISTS activities_lookup_idx
+  ON diet.activities (user_id, local_date DESC);
+
+-- Drives the zone backfill: what still needs a second request, newest first,
+-- without scanning the whole history every pass.
+CREATE INDEX IF NOT EXISTS activities_zone_backlog_idx
+  ON diet.activities (user_id, started_at DESC)
+  WHERE zones_fetched_at IS NULL AND zone_attempts < 3;
+
+DROP TRIGGER IF EXISTS activities_local_date ON diet.activities;
+CREATE TRIGGER activities_local_date BEFORE INSERT OR UPDATE ON diet.activities
+  FOR EACH ROW EXECUTE FUNCTION diet.set_local_date('started_at');
+
 -- --------------------------------------------------------------- meals ----
 -- Estimated data, deliberately not sharing columns with measurements.
 -- Corrections are append-only: a correction inserts a new meal and points the
@@ -533,7 +602,7 @@ CREATE INDEX IF NOT EXISTS targets_lookup_idx
 DO $rls$
 DECLARE t text;
 BEGIN
-  FOREACH t IN ARRAY ARRAY['measurements', 'meals', 'meal_items',
+  FOREACH t IN ARRAY ARRAY['measurements', 'activities', 'meals', 'meal_items',
                            'sync_state', 'garmin_credentials', 'targets'] LOOP
     EXECUTE format('ALTER TABLE diet.%I ENABLE ROW LEVEL SECURITY', t);
     -- FORCE so the table owner is bound by the policy too.
@@ -557,8 +626,8 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA diet TO diet_app;
 -- real contract and are listed one table at a time. A blanket grant on the
 -- schema also handed it diet.garmin_credentials, which the tool's own docstring
 -- never claimed and no query through it should reach.
-GRANT SELECT ON diet.meals, diet.meal_items, diet.measurements, diet.sync_state,
-                diet.targets
+GRANT SELECT ON diet.meals, diet.meal_items, diet.measurements, diet.activities,
+                diet.sync_state, diet.targets
   TO diet_ro;
 REVOKE ALL ON diet.garmin_credentials FROM diet_ro;
 

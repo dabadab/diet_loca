@@ -818,7 +818,9 @@ function wireSync(btn, noteEl) {
     try {
       const r = await api("/api/garmin/sync", { method: "POST" });
       if (note) note.textContent =
-        `stored ${r.stored} reading${r.stored === 1 ? "" : "s"} over ${r.days} days`
+        `stored ${r.stored} reading${r.stored === 1 ? "" : "s"}`
+        + (r.activities ? ` and ${r.activities} activit${r.activities === 1 ? "y" : "ies"}` : "")
+        + ` over ${r.days} days`
         + (r.rejected && r.rejected.length ? `; ${r.rejected.length} rejected` : "");
       await boot();                       // targets, days and health all move
     } catch (err) {

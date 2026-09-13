@@ -60,6 +60,7 @@ services:
       # So a manual sync from the web UI covers the same window as the poller
       # and archives its payloads in the same place.
       GARMIN_POLL_DAYS: ${GARMIN_POLL_DAYS:-3}
+      GARMIN_ZONE_BUDGET: ${GARMIN_ZONE_BUDGET:-10}
       GARMIN_RAW_DIR: /var/log/diet/garmin
       TZ: ${TZ:-UTC}
     volumes:
@@ -89,6 +90,7 @@ services:
       MIGRATION_DATABASE_URL: postgresql://${POSTGRES_USER:-diet_owner}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-diet}
       APP_DB_PASSWORD: ${APP_DB_PASSWORD}
       GARMIN_POLL_DAYS: ${GARMIN_POLL_DAYS:-3}
+      GARMIN_ZONE_BUDGET: ${GARMIN_ZONE_BUDGET:-10}
       GARMIN_POLL_LOOP: "1"
       # Today, often and cheaply; the trailing window, rarely.
       GARMIN_POLL_INTERVAL_SMALL: ${GARMIN_POLL_INTERVAL_SMALL:-900}
