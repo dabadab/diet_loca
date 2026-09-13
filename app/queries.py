@@ -55,6 +55,11 @@ SELECT cal.local_date                                        AS date,
        -- true when only the active portion is known, so the UI can avoid
        -- presenting an incomplete figure as a real expenditure total.
        (meas.total_kcal IS NULL AND meas.active_kcal IS NOT NULL) AS energy_out_partial,
+       -- Kept apart so today can be projected: passive burn is a whole-day
+       -- figure that can be averaged from past days, while active is whatever
+       -- has accumulated so far.
+       round(meas.active_kcal)::int                           AS active_kcal,
+       round(meas.total_kcal)::int                            AS total_kcal,
        round(meas.weight_kg::numeric, 1)                     AS weight_kg,
        tgt.kcal::int                                         AS target_kcal,
        round(tgt.protein_g, 1)                               AS target_protein_g,
