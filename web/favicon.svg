@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="13" fill="#F6F1E4"/>
+  <g stroke="#DCD4BC" stroke-width="2.5">
+    <line x1="0" y1="18" x2="64" y2="18"/><line x1="0" y1="46" x2="64" y2="46"/>
+  </g>
+  <circle cx="32" cy="39" r="20" fill="#B5452B"/>
+  <path d="M32 23 C25 13 16 12 13 15 C19 26 26 27 32 25 Z" fill="#4A6B3D"/>
+  <path d="M32 23 C39 13 48 12 51 15 C45 26 38 27 32 25 Z" fill="#4A6B3D"/>
+  <!-- Closes the seam where the two sepals meet, which otherwise lets a notch
+       of red through at large sizes. Invisible at 16px, wanted at 180. -->
+  <circle cx="32" cy="23" r="5.6" fill="#4A6B3D"/>
+</svg>

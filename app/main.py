@@ -447,6 +447,15 @@ def status(user: auth.User = Depends(current_user)):
 
 
 # Self-hosted fonts and any other page assets. Mounted before the MCP catch-all.
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    """Browsers ask for this at the root whatever the page links to."""
+    icon = settings.web_dir / "favicon.ico"
+    if not icon.is_file():
+        raise HTTPException(404, "not_found")
+    return FileResponse(icon, media_type="image/x-icon")
+
+
 if settings.web_dir.is_dir():
     app.mount("/static", StaticFiles(directory=settings.web_dir), name="static")
 
