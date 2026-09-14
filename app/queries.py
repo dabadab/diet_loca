@@ -52,9 +52,16 @@ SELECT cal.local_date                                        AS date,
        round(intake.carb_g, 1)                               AS carb_g,
        round(intake.fat_g, 1)                                AS fat_g,
        round(coalesce(meas.total_kcal, meas.active_kcal))::int AS energy_out_kcal,
-       -- true when only the active portion is known, so the UI can avoid
-       -- presenting an incomplete figure as a real expenditure total.
-       (meas.total_kcal IS NULL AND meas.active_kcal IS NOT NULL) AS energy_out_partial,
+       -- True when the expenditure figure is not final, so the UI does not
+       -- present it as a day's real total. Two ways that happens, and the
+       -- second one is easy to miss: only the active portion is known, OR the
+       -- day is simply not over. Garmin reports total_kcal for today from the
+       -- morning onwards and accrues passive burn into it as the hours pass,
+       -- so "total_kcal is present" is not the same as "the day's expenditure
+       -- is known" -- at 09:00 it is a third of what it will be.
+       (coalesce(meas.total_kcal, meas.active_kcal) IS NOT NULL
+        AND (meas.total_kcal IS NULL
+             OR cal.local_date = (SELECT to_date FROM bounds))) AS energy_out_partial,
        -- Kept apart so today can be projected: passive burn is a whole-day
        -- figure that can be averaged from past days, while active is whatever
        -- has accumulated so far.
