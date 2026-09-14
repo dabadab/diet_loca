@@ -519,24 +519,43 @@ function passiveAverage() {
   return recent.reduce((a, x) => a + (x.total_kcal - x.active_kcal), 0) / recent.length;
 }
 
+// The one place today's expenditure is decided, so the day card and the day
+// list cannot drift apart and show two different balances for the same day.
+//
+//   out   the figure to display
+//   why   what the projection is made of, when it is one
+//   firm  whether a balance drawn against it means anything. False only when
+//         the day is unfinished AND there is nothing to project from -- a new
+//         account with no complete day yet -- where in - out would read as a
+//         large surplus. The figure is still shown; the balance is not.
+function outFor(d) {
+  const isToday = state.days.length && d.date === state.days[0].date;
+  if (isToday && d.energy_out_partial) {
+    const passive = passiveAverage();
+    if (passive != null) {
+      return { out: passive + (d.active_kcal || 0), firm: true,
+               why: `passive ${n0(passive)} averaged from recent days `
+                  + `+ active ${n0(d.active_kcal || 0)} so far` };
+    }
+  }
+  return { out: d.energy_out_kcal, why: null, firm: !d.energy_out_partial };
+}
+
+// Why a shown expenditure is not the day's final figure.
+function partialNote(d) {
+  return d.total_kcal == null ? "active calories only"
+                             : "still accruing — the day is not over";
+}
+
 function energyRow(d) {
   // Same three fields in the same order every day. Today's out and balance are
   // projected rather than measured -- passive burn for the whole day plus the
   // activity done so far -- because the raw figures read as a large surplus
   // until evening. Marked, not relabelled, so the row stays comparable.
-  const isToday = state.days.length && d.date === state.days[0].date;
-  let out = d.energy_out_kcal, projected = null;
+  const { out, why: projected, firm } = outFor(d);
 
-  if (isToday && d.energy_out_partial) {
-    const passive = passiveAverage();
-    if (passive != null) {
-      out = passive + (d.active_kcal || 0);
-      projected = `passive ${n0(passive)} averaged from recent days `
-                + `+ active ${n0(d.active_kcal || 0)} so far`;
-    }
-  }
-
-  const bal = d.energy_in_kcal != null && out != null ? d.energy_in_kcal - out : null;
+  const bal = d.energy_in_kcal != null && out != null && firm
+    ? d.energy_in_kcal - out : null;
   const parts = [];
   if (out != null) parts.push(`<span class="label">out</span>
     <span class="figure">${n0(out)} kcal</span>`);
@@ -572,22 +591,22 @@ function mealsHtml(detail) {
 function dayListCard() {
   const today = state.days[0].date;
   const rows = state.days.map((d) => {
-    // A partial expenditure makes the balance meaningless -- today's would read
-    // as a large surplus all morning. The projection for today lives in the day
-    // card, where it can say what it is made of; the list stays factual.
-    const known = d.energy_in_kcal != null && d.energy_out_kcal != null
-      && !d.energy_out_partial;
-    const bal = known ? d.energy_in_kcal - d.energy_out_kcal : null;
+    // Today's raw expenditure would read as a large surplus all morning, so the
+    // list shows the same projection the day card does rather than either a
+    // false balance or a blank. Marked, and the out cell shows the projected
+    // figure too, so that in - out still ties up across the row.
+    const { out, why, firm } = outFor(d);
+    const bal = d.energy_in_kcal != null && out != null && firm
+      ? d.energy_in_kcal - out : null;
     const inCell = d.energy_in_kcal == null ? '<span class="muted">—</span>'
       : `<span class="${d.intake_source === "claude-estimate" ? "est" : ""}"
            title="${d.intake_source === "claude-estimate"
              ? "estimated from a description" : "measured"}">${n0(d.energy_in_kcal)}</span>`;
-    const outCell = d.energy_out_kcal == null ? '<span class="muted">—</span>'
+    const outCell = out == null ? '<span class="muted">—</span>'
+      : why ? `<span class="partial" title="${esc("projected: " + why)}">${n0(out)}</span>`
       : d.energy_out_partial
-        ? `<span class="partial" title="${d.total_kcal == null
-             ? "active calories only"
-             : "still accruing — the day is not over"}">${n0(d.energy_out_kcal)}</span>`
-        : n0(d.energy_out_kcal);
+        ? `<span class="partial" title="${esc(partialNote(d))}">${n0(out)}</span>`
+        : n0(out);
     const dt = new Date(d.date + "T12:00:00");
     const label = dt.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
     return `
@@ -596,8 +615,9 @@ function dayListCard() {
         <td class="date">${esc(label)}</td>
         <td>${inCell}</td>
         <td>${d.protein_g == null ? '<span class="muted">—</span>' : n1(d.protein_g)}</td>
-        <td class="${bal == null ? "muted" : bal < 0 ? "neg" : "pos"}"${
-          bal == null && d.energy_out_partial ? ' title="day still in progress"' : ""}>${
+        <td class="${bal == null ? "muted" : bal < 0 ? "neg" : "pos"}${why ? " partial" : ""}"${
+          why ? ` title="${esc("projected: " + why)}"`
+          : bal == null && d.energy_out_partial ? ` title="${esc(partialNote(d))}"` : ""}>${
           bal == null ? "—" : (bal > 0 ? "+" : "") + n0(bal)}</td>
         <td>${outCell}</td>
         <td>${d.weight_kg == null ? '<span class="muted">—</span>' : n1(d.weight_kg)}</td>
