@@ -284,6 +284,8 @@ Built, on FastMCP 4, and verified against Postgres 13 and 17:
 - `get_activities(from?, to?, activity_type?)` — workouts with their heart-rate
   zone breakdown; the docstring says outright that their calories are already
   inside `active_kcal` and must not be added to expenditure
+- `ignore_day(date, reason)` / `unignore_day(date)` / `get_ignored_days()` —
+  leave a day out of the summaries, with the reason recorded
 - `query_sql(sql)` — separate **read-only** Postgres role, RLS still applies
 
 Two things the testing changed. The `SELECT`-prefix check on `query_sql` is not
@@ -384,6 +386,28 @@ you were aiming at *then*, and the schema now says so.
 - `diet_ro` is granted `SELECT`, so `query_sql` can answer "which days did I
   miss protein". Deliberate: that grant list has been opt-in since the security
   review.
+
+## Ignored days (implemented)
+
+A day can be left out of the summaries: illness, travel, a day the tracker was
+not worn, a deliberate one-off that would otherwise drag every average through
+it. Managed only through MCP, like targets.
+
+`diet.ignored_days` has no `ignored = false` state — presence of the row is the
+flag, so a day nobody has said anything about is simply counted. `reason` is
+`NOT NULL`: an excluded day is precisely what makes someone ask "why is this
+week different" later, and an unexplained exclusion cannot answer it. Nothing is
+deleted or hidden; the day keeps its meals, measurements and activities and
+still appears in the day list.
+
+The page marks it, and this is the part worth getting right: **a dimmed row that
+is actually being averaged in, or a normal-looking row that is not, is worse
+than no marking at all.** So `uncountedReason(d)` is the single definition of
+"this day is out", returning why, and both the Summary tab's day selection and
+the day list's dimming go through it. Three reasons reach the UI — explicitly
+ignored, today (not counted until complete), and nothing recorded — each as a
+tooltip on the row. Only a deliberate exclusion also gets a ✕, so "set aside on
+purpose" stays distinguishable from "not yet".
 
 ## Frontend
 

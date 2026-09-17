@@ -209,6 +209,9 @@ def get_day(date: str | None = None) -> dict:
     them: an activity's `kcal` is ALREADY counted inside the day's
     `active_kcal` measurement. Never add activity calories to energy
     expenditure — doing so double-counts every day with training on it.
+
+    `ignored` means the day has been deliberately left out of the summaries;
+    `ignored_reason` says why. Its figures below are still real.
     """
     user_id, tz = _identity()
     with db.user_tx(user_id) as cur:
@@ -341,6 +344,66 @@ def clear_target(effective_from: str) -> dict:
 
 
 @mcp.tool
+def ignore_day(date: str, reason: str) -> dict:
+    """
+    Leave a day out of the summaries and averages.
+
+    For days that would misrepresent the picture rather than inform it: illness,
+    travel, a day the tracker was not worn so expenditure is missing, a
+    deliberate one-off that would drag every average it touches.
+
+    Nothing is deleted or hidden. The day keeps its meals, measurements and
+    activities, still appears in the day list, and can still be read with
+    `get_day` — it is simply not averaged in, and the page shows it dimmed.
+
+    `reason` is required, not decoration: an excluded day is exactly what makes
+    someone ask "why is this week different", and an unexplained exclusion
+    cannot answer that later. A few words is enough ("food poisoning",
+    "watch left at home").
+
+    Ignoring an already-ignored day replaces the reason.
+    """
+    user_id, tz = _identity()
+    when = _parse_date(date, tz)
+    if not (reason or "").strip():
+        raise ToolError("a reason is required — say why the day should not count")
+    try:
+        with db.user_tx(user_id) as cur:
+            return writes.ignore_day(cur, local_date=when, reason=reason.strip())
+    except psycopg.Error as exc:
+        raise _explain(exc) from None
+
+
+@mcp.tool
+def unignore_day(date: str) -> dict:
+    """
+    Count a day in the summaries again, undoing `ignore_day`.
+
+    Refuses a day that was not ignored, rather than reporting success for a
+    change it did not make.
+    """
+    user_id, tz = _identity()
+    when = _parse_date(date, tz)
+    with db.user_tx(user_id) as cur:
+        if not writes.unignore_day(cur, local_date=when):
+            others = [d["date"] for d in queries.ignored_days(cur)]
+            raise ToolError(
+                f"{when.isoformat()} was not being ignored; "
+                + (f"currently ignored: {', '.join(others[:8])}" if others
+                   else "no days are currently ignored"))
+        return {"date": when.isoformat(), "ignored": False}
+
+
+@mcp.tool
+def get_ignored_days() -> dict:
+    """Every day currently left out of the summaries, with the reason and when
+    it was set. Newest first."""
+    user_id, _ = _identity()
+    with db.user_tx(user_id) as cur:
+        return {"ignored": queries.ignored_days(cur)}
+
+
+@mcp.tool
 def query_sql(sql: str) -> dict:
     """
     Run a read-only SQL query against the user's own data, for questions the
@@ -350,8 +413,8 @@ def query_sql(sql: str) -> dict:
     the identity tables at all. Row-level security still applies, so you can
     only ever read this user's rows — write the query as if the tables held
     their data alone. Tables: diet.meals, diet.meal_items, diet.measurements,
-    diet.activities, diet.sync_state, diet.targets. Single SELECT (or WITH)
-    statement, at most 500 rows returned.
+    diet.activities, diet.sync_state, diet.targets, diet.ignored_days. Single
+    SELECT (or WITH) statement, at most 500 rows returned.
     """
     if not db.ro_pool_ready():
         raise ToolError("ad-hoc SQL is not available on this server "

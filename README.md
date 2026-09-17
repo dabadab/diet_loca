@@ -108,8 +108,9 @@ itself.
 
 ## MCP
 
-Nine tools at `POST /mcp`: `log_meal`, `correct_meal`, `get_day`, `get_range`,
-`get_activities`, `get_targets`, `set_target`, `clear_target`, `query_sql`.
+Twelve tools at `POST /mcp`: `log_meal`, `correct_meal`, `get_day`,
+`get_range`, `get_activities`, `get_targets`, `set_target`, `clear_target`,
+`ignore_day`, `unignore_day`, `get_ignored_days`, `query_sql`.
 
 `get_activities` returns Garmin workouts with their duration, distance,
 calories, heart rate and per-zone seconds, and `get_day` lists the day's
@@ -122,7 +123,14 @@ Targets are effective-dated — set from a date, applying until a later one
 supersedes it — so asking Claude to "set 1800 kcal from the 1st" re-scores
 exactly the days from then onwards and leaves earlier ones judged against what
 you were actually aiming at. They are managed only through Claude; the page
-shows the one in force and since when. Two ways to authenticate, on the same server:
+shows the one in force and since when.
+
+Ask Claude to leave a day out of the averages — "ignore Monday, I had food
+poisoning" — and it stays in the day list with its real figures, dimmed and
+marked, but out of every summary. The reason is required, because it is the
+only thing that will explain the gap months later.
+
+Two ways to authenticate, on the same server:
 
 **Bearer token** — for Claude Code, MCP Inspector and scripts:
 

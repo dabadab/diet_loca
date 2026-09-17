@@ -71,6 +71,11 @@ SELECT cal.local_date                                        AS date,
        tgt.kcal::int                                         AS target_kcal,
        round(tgt.protein_g, 1)                               AS target_protein_g,
        coalesce(logged.meals, 0)::int                        AS meals_logged,
+       -- Deliberately excluded from the summaries. The row's own figures are
+       -- untouched; this only says "do not average me in", and carries the
+       -- reason so the page can say why rather than just dimming a line.
+       (ign.local_date IS NOT NULL)                          AS ignored,
+       ign.reason                                            AS ignored_reason,
        CASE WHEN intake.any_estimated IS TRUE THEN 'claude-estimate'
             WHEN intake.kcal IS NOT NULL      THEN 'manual'
             ELSE NULL END                                    AS intake_source
@@ -85,6 +90,7 @@ LEFT JOIN LATERAL (
     ORDER BY t.effective_from DESC
     LIMIT 1
 ) tgt ON true
+LEFT JOIN diet.ignored_days ign ON ign.local_date = cal.local_date
 LEFT JOIN intake ON intake.local_date = cal.local_date
 LEFT JOIN logged ON logged.local_date = cal.local_date
 LEFT JOIN meas   ON meas.local_date   = cal.local_date
@@ -174,6 +180,10 @@ def day_detail(cur, local_date) -> dict:
     cur.execute(_TARGET_ON_SQL, {"d": local_date})
     tgt = cur.fetchone()
 
+    cur.execute("SELECT reason FROM diet.ignored_days WHERE local_date = %(d)s",
+                {"d": local_date})
+    ign = cur.fetchone()
+
     return {
         "date": str(local_date),
         "meals": meals,
@@ -185,6 +195,10 @@ def day_detail(cur, local_date) -> dict:
         "energy_in_kcal": round(sum(m["kcal"] for m in meals)) if meals else None,
         "target_kcal": tgt["kcal"] if tgt else None,
         "target_protein_g": float(tgt["protein_g"]) if tgt else None,
+        # Excluded from averages and totals, with the reason. The day's own
+        # figures above are unaffected.
+        "ignored": ign is not None,
+        "ignored_reason": ign["reason"] if ign else None,
     }
 
 
@@ -344,3 +358,16 @@ def activities_range(cur, from_date, to_date, activity_type=None) -> list[dict]:
          ORDER BY started_at DESC""",
         {"a": from_date, "b": to_date, "t": activity_type})
     return [_activity_row(r) for r in cur.fetchall()]
+
+
+# -------------------------------------------------------- ignored days ----
+
+def ignored_days(cur) -> list[dict]:
+    """Every day excluded from the summaries, newest first."""
+    cur.execute("""
+        SELECT local_date, reason, created_at
+        FROM diet.ignored_days ORDER BY local_date DESC
+    """)
+    return [{"date": r["local_date"].isoformat(),
+             "reason": r["reason"],
+             "set_at": r["created_at"].isoformat()} for r in cur.fetchall()]

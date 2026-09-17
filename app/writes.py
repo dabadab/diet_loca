@@ -186,3 +186,28 @@ def clear_target(cur, *, effective_from) -> bool:
     """
     cur.execute("DELETE FROM diet.targets WHERE effective_from = %s", (effective_from,))
     return cur.rowcount > 0
+
+
+def ignore_day(cur, *, local_date, reason: str) -> dict:
+    """
+    Leave a day out of the summaries. Re-ignoring updates the reason.
+
+    Nothing is deleted or hidden: the day keeps its meals, measurements and
+    activities and still appears in the day list. This only stops it being
+    averaged in.
+    """
+    cur.execute("""
+        INSERT INTO diet.ignored_days (user_id, local_date, reason)
+        VALUES (diet.current_user_id(), %s, %s)
+        ON CONFLICT (user_id, local_date) DO UPDATE
+          SET reason = EXCLUDED.reason, created_at = now()
+        RETURNING local_date, reason
+    """, (local_date, reason))
+    row = cur.fetchone()
+    return {"date": row["local_date"].isoformat(), "reason": row["reason"]}
+
+
+def unignore_day(cur, *, local_date) -> bool:
+    """Count a day again. Returns whether it had been ignored."""
+    cur.execute("DELETE FROM diet.ignored_days WHERE local_date = %s", (local_date,))
+    return cur.rowcount > 0

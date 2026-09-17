@@ -594,6 +594,25 @@ CREATE TABLE IF NOT EXISTS diet.targets (
 CREATE INDEX IF NOT EXISTS targets_lookup_idx
   ON diet.targets (user_id, effective_from DESC);
 
+-- -------------------------------------------------------- ignored days ----
+-- Days deliberately left out of the summaries: illness, travel, a day the
+-- tracker was not worn, a deliberate blowout that would otherwise drag every
+-- average. Presence of the row is the flag -- there is no "ignored = false",
+-- because a day nobody has said anything about is simply counted.
+--
+-- The day's own data is untouched and still shown. This excludes it from
+-- aggregates, it does not delete or hide anything.
+
+CREATE TABLE IF NOT EXISTS diet.ignored_days (
+  user_id    uuid NOT NULL REFERENCES auth.users(user_id) ON DELETE CASCADE,
+  local_date date NOT NULL,
+  -- Worth insisting on: "why is this week's average different" is exactly the
+  -- question this table creates, and an unexplained exclusion cannot answer it.
+  reason     text NOT NULL CHECK (length(reason) BETWEEN 1 AND 500),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, local_date)
+);
+
 -- ---------------------------------------------------------------- RLS -----
 -- Applied by loop rather than by hand: adding a table to the list is the only
 -- thing anyone has to remember, and no table can quietly end up unprotected.
@@ -602,7 +621,8 @@ DO $rls$
 DECLARE t text;
 BEGIN
   FOREACH t IN ARRAY ARRAY['measurements', 'activities', 'meals', 'meal_items',
-                           'sync_state', 'garmin_credentials', 'targets'] LOOP
+                           'sync_state', 'garmin_credentials', 'targets',
+                           'ignored_days'] LOOP
     EXECUTE format('ALTER TABLE diet.%I ENABLE ROW LEVEL SECURITY', t);
     -- FORCE so the table owner is bound by the policy too.
     EXECUTE format('ALTER TABLE diet.%I FORCE ROW LEVEL SECURITY', t);
@@ -626,7 +646,7 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA diet TO diet_app;
 -- schema also handed it diet.garmin_credentials, which the tool's own docstring
 -- never claimed and no query through it should reach.
 GRANT SELECT ON diet.meals, diet.meal_items, diet.measurements, diet.activities,
-                diet.sync_state, diet.targets
+                diet.sync_state, diet.targets, diet.ignored_days
   TO diet_ro;
 REVOKE ALL ON diet.garmin_credentials FROM diet_ro;
 

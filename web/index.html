@@ -212,6 +212,15 @@
   table.days tr.day-row.active td { background: var(--paper); }
   table.days tr.day-row.active td.date { font-weight: 700; }
   table.days tr.day-row.active td:first-child { box-shadow: inset 3px 0 0 var(--leaf-dark); }
+  /* Not in the summary. Dimmed rather than hidden: the day's figures are still
+     real and still worth seeing, they are simply not averaged in. Dimming the
+     cells rather than the row keeps the active-row marker at full strength. */
+  table.days tr.day-row.uncounted td { opacity: 0.45; }
+  table.days tr.day-row.uncounted:hover td,
+  table.days tr.day-row.uncounted.active td { opacity: 0.75; }
+  .ignored-mark {
+    color: var(--tomato); font-weight: 700; margin-left: 6px; font-size: 0.8em;
+  }
   td.date { font-family: 'Karla', sans-serif; font-size: 0.9rem; padding-left: 10px; }
   .est { border-bottom: 1px dotted var(--ink-soft); }
   .partial { border-bottom: 1px dotted var(--butter); }
@@ -526,6 +535,18 @@ function passiveAverage() {
   return recent.reduce((a, x) => a + (x.total_kcal - x.active_kcal), 0) / recent.length;
 }
 
+// Why a day is left out of the summaries, or null when it is counted. The one
+// definition, so the Summary tab and the day list can never disagree about
+// which days are in -- a dimmed row that is actually being averaged in, or a
+// normal-looking row that is not, is worse than no marking at all.
+function uncountedReason(d) {
+  const today = state.days.length ? state.days[0].date : null;
+  if (d.ignored) return d.ignored_reason || "deliberately ignored";
+  if (d.date === today) return "today is not counted until it is complete";
+  if (!(d.meals_logged > 0 || d.energy_out_kcal != null)) return "nothing recorded";
+  return null;
+}
+
 // The one place today's expenditure is decided, so the day card and the day
 // list cannot drift apart and show two different balances for the same day.
 //
@@ -614,12 +635,15 @@ function dayListCard() {
       : d.energy_out_partial
         ? `<span class="partial" title="${esc(partialNote(d))}">${n0(out)}</span>`
         : n0(out);
+    const uncounted = uncountedReason(d);
     const dt = new Date(d.date + "T12:00:00");
     const label = dt.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
     return `
-      <tr class="day-row${d.date === state.activeDate ? " active" : ""}${d.date === today ? " today" : ""}"
-          data-date="${d.date}">
-        <td class="date">${esc(label)}</td>
+      <tr class="day-row${d.date === state.activeDate ? " active" : ""}${
+            d.date === today ? " today" : ""}${uncounted ? " uncounted" : ""}"
+          data-date="${d.date}"${uncounted ? ` title="not in the summary: ${esc(uncounted)}"` : ""}>
+        <td class="date">${esc(label)}${
+          d.ignored ? '<span class="ignored-mark" aria-label="ignored">✕</span>' : ""}</td>
         <td>${inCell}</td>
         <td>${d.protein_g == null ? '<span class="muted">—</span>' : n1(d.protein_g)}</td>
         <td class="${bal == null ? "muted" : bal < 0 ? "neg" : "pos"}${why ? " partial" : ""}"${
@@ -752,7 +776,8 @@ function renderRollup() {
   // the deficit look better than it is, so summaries cover complete days only.
   const today = state.days.length ? state.days[0].date : null;
   const hasData = (d) => d.meals_logged > 0 || d.energy_out_kcal != null;
-  const recorded = state.days.filter((d) => d.date !== today && hasData(d));
+  const recorded = state.days.filter((d) => uncountedReason(d) == null);
+  const ignoredCount = state.days.filter((d) => d.ignored).length;
   if (!recorded.length) {
     const onlyToday = state.days.some((d) => d.date === today && hasData(d));
     box.innerHTML = `<div class="block-card"><div class="empty-note">${
@@ -791,7 +816,8 @@ function renderRollup() {
   box.innerHTML = `
     <div class="block-card">
       <div class="block-title"><h2>Complete days</h2>
-        <span class="sub">${all.n} days · ${all.intakeDays} with meals · today excluded</span></div>
+        <span class="sub">${all.n} days · ${all.intakeDays} with meals · today excluded${
+          ignoredCount ? ` · ${ignoredCount} ignored` : ""}</span></div>
       ${statsBlock(all)}
       ${scored.length ? `<div class="avg-line" style="margin-top:12px">
         calorie target exceeded on ${overKcal} of ${scored.length} days with a target ·
