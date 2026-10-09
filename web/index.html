@@ -539,19 +539,52 @@ function passiveAverage() {
 // definition, so the Summary tab and the day list can never disagree about
 // which days are in -- a dimmed row that is actually being averaged in, or a
 // normal-looking row that is not, is worse than no marking at all.
-function uncountedReason(d) {
+function uncountedKind(d) {
   const today = state.days.length ? state.days[0].date : null;
   const goal = state.target ? state.target.effective_from : null;
-  if (d.ignored) return d.ignored_reason || "deliberately ignored";
-  if (d.date === today) return "today is not counted until it is complete";
-  if (!(d.meals_logged > 0 || d.energy_out_kcal != null)) return "nothing recorded";
+  if (d.ignored) return "ignored";
+  if (d.date === today) return "today";
+  if (!(d.meals_logged > 0 || d.energy_out_kcal != null)) return "empty";
   // The summary is about the goal in force, so it starts the day that goal took
   // effect. Scoring a cut against the maintenance weeks before it compares two
   // different intentions -- the same reason targets are effective-dated at all.
   // Days before it keep their own figures and their own per-day target; they
   // are simply not this goal's evidence.
-  if (goal && d.date < goal) return `before the current goal, which starts ${goal}`;
+  if (goal && d.date < goal) return "pregoal";
   return null;
+}
+
+// The message a row shows. Derived from the kind rather than deciding again,
+// so the header's accounting and the row's tooltip cannot disagree about why a
+// day is out -- or about whether it is.
+function uncountedReason(d) {
+  switch (uncountedKind(d)) {
+    case "ignored": return d.ignored_reason || "deliberately ignored";
+    case "today":   return "today is not counted until it is complete";
+    case "empty":   return "nothing recorded";
+    case "pregoal": return "before the current goal, which starts "
+                         + state.target.effective_from;
+    default:        return null;
+  }
+}
+
+// Every day the summary left out, by reason. Counting from the same rule that
+// excluded them is the point: "31 days" beside "7 ignored" read as though the
+// seven might be inside the thirty-one, and the seven were counted over the
+// whole fetched window rather than over the days that were ever candidates, so
+// the arithmetic did not close either way.
+function uncountedSummary() {
+  const order = [["ignored", "ignored"], ["pregoal", "before the goal"],
+                 ["empty", "with nothing recorded"]];
+  const counts = {};
+  for (const d of state.days) {
+    const kind = uncountedKind(d);
+    if (kind) counts[kind] = (counts[kind] || 0) + 1;
+  }
+  const parts = order.filter(([k]) => counts[k])
+                     .map(([k, label]) => `${counts[k]} ${label}`);
+  if (counts.today) parts.push("today");   // always one day, so never a count
+  return parts.join(" · ");
 }
 
 // The one place today's expenditure is decided, so the day card and the day
@@ -784,7 +817,7 @@ function renderRollup() {
   const today = state.days.length ? state.days[0].date : null;
   const hasData = (d) => d.meals_logged > 0 || d.energy_out_kcal != null;
   const recorded = state.days.filter((d) => uncountedReason(d) == null);
-  const ignoredCount = state.days.filter((d) => d.ignored).length;
+  const excluded = uncountedSummary();
   if (!recorded.length) {
     const onlyToday = state.days.some((d) => d.date === today && hasData(d));
     box.innerHTML = `<div class="block-card"><div class="empty-note">${
@@ -823,13 +856,15 @@ function renderRollup() {
   box.innerHTML = `
     <div class="block-card">
       <div class="block-title"><h2>${state.target ? "Since the goal" : "Complete days"}</h2>
-        <span class="sub">${all.n} days · ${all.intakeDays} with meals · today excluded${
-          ignoredCount ? ` · ${ignoredCount} ignored` : ""}</span></div>
+        <span class="sub">${all.n} day${all.n === 1 ? "" : "s"} counted · ${
+          all.intakeDays} with meals</span></div>
       ${state.target ? `<div class="avg-line" style="margin-top:-2px">since the goal
         was set on ${esc(state.target.effective_from)}${
           state.windowTruncated
             ? ` — only the last ${state.windowDays} days are loaded, so earlier ones are missing`
             : ""}</div>` : ""}
+      ${excluded ? `<div class="avg-line"${state.target ? "" : ' style="margin-top:-2px"'
+        }>not counted: ${excluded}</div>` : ""}
       ${statsBlock(all)}
       ${scored.length ? `<div class="avg-line" style="margin-top:12px">
         calorie target exceeded on ${overKcal} of ${scored.length} days with a target ·

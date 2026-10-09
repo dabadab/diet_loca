@@ -89,6 +89,57 @@ class TestWhichDaysCount:
         assert all(r is None for d, r in got.items() if d != "2026-09-20")
 
 
+class TestExclusionAccounting:
+    """The header used to read "31 days · 31 with meals · today excluded · 7
+    ignored", which left it unclear whether the seven were inside the
+    thirty-one -- and they were counted over the whole fetched window rather
+    than over the days that were ever candidates, so neither reading added up.
+    These assert the arithmetic now closes."""
+
+    def _state(self, days, target=None):
+        return {"days": days, "target": target}
+
+    def test_counted_and_excluded_account_for_every_day(self):
+        days = [day("2026-09-20"),                                     # today
+                *[day(f"2026-09-{d:02d}", ignored=True,
+                      ignored_reason="travel") for d in (19, 18)],
+                day("2026-09-17", meals_logged=0, energy_in_kcal=None,
+                    energy_out_kcal=None),
+                *[day(f"2026-09-{d:02d}") for d in (16, 15, 14)]]
+        got = page(self._state(days),
+                   {"summary": ["uncountedSummary"],
+                    "stats": ["statsFor", [d for d in days]]})
+        assert got["summary"] == "2 ignored · 1 with nothing recorded · today"
+        # 3 counted + 2 ignored + 1 empty + today == the whole window
+        counted = page(self._state(days),
+                       {k: ["uncountedKind", d] for k, d in
+                        ((d["date"], d) for d in days)})
+        assert sum(1 for v in counted.values() if v is None) == 3
+        assert len(days) == 3 + 2 + 1 + 1
+
+    def test_pregoal_days_are_accounted_for_too(self):
+        days = [day("2026-09-20"), day("2026-09-19"), day("2026-09-13")]
+        target = {"effective_from": "2026-09-14", "kcal": 1800,
+                  "protein_g": 150.0, "note": None}
+        got = page(self._state(days, target), {"s": ["uncountedSummary"]})["s"]
+        assert got == "1 before the goal · today"
+
+    def test_today_is_never_given_a_count(self):
+        """It is always exactly one day; "1 today" would read as a quantity."""
+        days = [day("2026-09-20"), day("2026-09-19")]
+        assert page(self._state(days), {"s": ["uncountedSummary"]})["s"] == "today"
+
+    def test_an_ignored_day_that_was_never_a_candidate_is_not_double_counted(self):
+        """A day before the goal that is also ignored is reported once, under a
+        single reason -- otherwise the parts sum to more than the window."""
+        days = [day("2026-09-20"), day("2026-09-19"),
+                day("2026-09-13", ignored=True, ignored_reason="travel")]
+        target = {"effective_from": "2026-09-14", "kcal": 1800,
+                  "protein_g": 150.0, "note": None}
+        got = page(self._state(days, target), {"s": ["uncountedSummary"]})["s"]
+        assert got == "1 ignored · today", got
+
+
 class TestTodaysProjection:
     """Garmin's figure for today accrues through the day, so the raw number
     reads as an enormous surplus all morning. The page projects instead: a

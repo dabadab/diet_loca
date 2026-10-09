@@ -31,8 +31,9 @@ function fnSource(name) {
 const helpers = src.split("\n").filter((l) =>
   /^const (esc|n0|n1) = /.test(l) || l.startsWith('  (c) => ({ "&"')).join("\n");
 
-const WANTED = ["uncountedReason", "passiveAverage", "outFor", "partialNote",
-                "statsFor", "stat", "avgRow", "bar", "statsBlock", "dayListCard"];
+const WANTED = ["uncountedKind", "uncountedReason", "uncountedSummary",
+                "passiveAverage", "outFor", "partialNote", "statsFor", "stat",
+                "avgRow", "bar", "statsBlock", "dayListCard", "renderRollup"];
 
 globalThis.state = input.state;
 globalThis.el = () => ({ innerHTML: "" });

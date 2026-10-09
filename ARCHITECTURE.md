@@ -402,12 +402,21 @@ still appears in the day list.
 
 The page marks it, and this is the part worth getting right: **a dimmed row that
 is actually being averaged in, or a normal-looking row that is not, is worse
-than no marking at all.** So `uncountedReason(d)` is the single definition of
-"this day is out", returning why, and both the Summary tab's day selection and
-the day list's dimming go through it. Four reasons reach the UI — explicitly
-ignored, today (not counted until complete), nothing recorded, and before the
-current goal began — each as a tooltip on the row. Only a deliberate exclusion
-also gets a ✕, so "set aside on purpose" stays distinguishable from "not yet".
+than no marking at all.** So `uncountedKind(d)` is the single definition of
+"this day is out", and everything else derives from it: `uncountedReason(d)`
+turns the kind into the row's tooltip, the Summary tab's day selection keeps the
+days with no kind, and the day list dims the rest. Four kinds — `ignored`,
+`today`, `empty`, `pregoal` — and only a deliberate exclusion also gets a ✕, so
+"set aside on purpose" stays distinguishable from "not yet".
+
+The summary header accounts for all of them, because it has to add up. It used
+to read `31 days · 31 with meals · today excluded · 7 ignored`, which left the
+reader unable to tell whether the seven were inside the thirty-one — they were
+not — and counted ignored days over the whole fetched window rather than over
+the days that were ever candidates, so neither reading closed. It now says `31
+days counted` and, on its own line, `not counted: 7 ignored · today`, built by
+tallying `uncountedKind` over the window. Counted plus excluded equals the
+window, and a day excluded for two reasons at once is reported under one.
 
 ## The summary covers the current goal
 
