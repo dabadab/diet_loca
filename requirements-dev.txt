@@ -1,0 +1,4 @@
+# Test-only dependencies. The suite needs Docker on PATH as well, to bring up a
+# throwaway Postgres -- or set DIET_TEST_DSN to point at one you already have.
+-r requirements.txt
+pytest==9.1.1

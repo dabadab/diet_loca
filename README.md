@@ -106,6 +106,16 @@ No endpoint takes a user id, and neither does any MCP tool. There is no
 argument by which a client — or a model driving a tool — can name anyone but
 itself.
 
+## Tests
+
+```sh
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m pytest
+```
+
+Real Postgres, a real server and a real OAuth exchange — a throwaway container
+per run, no live Garmin account. See [tests/README.md](tests/README.md).
+
 ## MCP
 
 Twelve tools at `POST /mcp`: `log_meal`, `correct_meal`, `get_day`,

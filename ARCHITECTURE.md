@@ -446,6 +446,28 @@ pointed at Postgres later for the user's own ad-hoc charts if wanted — that's
 free given the existing Grafana/VictoriaMetrics setup — but it's not the
 primary UI.
 
+## Tests
+
+`tests/`, pytest, against a real cluster rather than a mocked cursor — almost
+everything worth testing here *is* the database, and a fake cursor agrees with
+whatever the code believes. A fresh database per test, because these assert on
+counts and averages over whole tables and cross-test residue would make the
+numbers untrustworthy.
+
+Two choices worth recording. The **Garmin seam is `garmin.fetch_*`**: above it
+everything is real including the writes, below it is their HTTP and is faked, so
+the suite never depends on someone's actual sleep or spends requests against a
+rate limit. And `tests/web_harness.js` **lifts the page's functions out of
+`index.html` by name** instead of reimplementing them — the browser decides
+which days the summary counts and what today's projection is, every one of those
+has been wrong at some point, and a reimplementation could not catch a change to
+the original.
+
+The suite was validated by mutation, not by passing: reverting
+`energy_out_partial` to its old definition, dropping a table from the `DO $rls$`
+loop, removing the pre-goal exclusion, and letting activity calories into the
+energy view each fail exactly the test written for them.
+
 ## Open / deferred
 
 - **Adding a measurement metric needs a real migration.** `bmr_kcal` is the
