@@ -296,16 +296,32 @@ def me(user: auth.User = Depends(current_user)):
             "email": user.email, "timezone": user.timezone}
 
 
+# A year and a bit. The window is normally the page's own, but it stretches to
+# reach the start of the goal in force, and a goal can be old.
+MAX_DAYS = 400
+
+
 @app.get("/api/days")
 def days(days: int = 7, user: auth.User = Depends(current_user)):
-    n = max(1, min(int(days), 60))
+    n = max(1, min(int(days), MAX_DAYS))
     today = datetime.now(ZoneInfo(user.timezone)).date()
     with db.user_tx(user.user_id) as cur:
-        rows = queries.days(cur, user.timezone, n)
         # The whole entry in force today, not just its numbers: the page shows
         # since when it has applied, which is the point of effective dating.
         target = queries.target_on(cur, today)
-    return {"timezone": user.timezone, "days": rows, "target": target}
+        # The summary covers the current goal, so the window has to reach back
+        # to the day that goal took effect -- otherwise the page would quietly
+        # score a three-month cut over whatever its last four weeks happened to
+        # be. Resolved here rather than by a second round trip, so the page
+        # still boots on one call.
+        if target:
+            since = (today - date_cls.fromisoformat(target["effective_from"])).days + 1
+            n = max(1, min(max(n, since), MAX_DAYS))
+        rows = queries.days(cur, user.timezone, n)
+    return {"timezone": user.timezone, "days": rows, "target": target,
+            # What the window actually managed to cover, so the page can say so
+            # rather than implying it reached a goal start it never got to.
+            "window_days": n, "max_days": MAX_DAYS}
 
 
 @app.get("/api/day/{day}")

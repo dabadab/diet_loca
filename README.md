@@ -125,6 +125,11 @@ exactly the days from then onwards and leaves earlier ones judged against what
 you were actually aiming at. They are managed only through Claude; the page
 shows the one in force and since when.
 
+The Summary covers **the goal in force** — it starts the day that target took
+effect, so switching from maintenance to a cut starts the scoring over instead
+of blending the two. Days before it stay in the day list with their own figures,
+dimmed, like any other day that is not counted.
+
 Ask Claude to leave a day out of the averages — "ignore Monday, I had food
 poisoning" — and it stays in the day list with its real figures, dimmed and
 marked, but out of every summary. The reason is required, because it is the

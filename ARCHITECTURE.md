@@ -404,10 +404,39 @@ The page marks it, and this is the part worth getting right: **a dimmed row that
 is actually being averaged in, or a normal-looking row that is not, is worse
 than no marking at all.** So `uncountedReason(d)` is the single definition of
 "this day is out", returning why, and both the Summary tab's day selection and
-the day list's dimming go through it. Three reasons reach the UI — explicitly
-ignored, today (not counted until complete), and nothing recorded — each as a
-tooltip on the row. Only a deliberate exclusion also gets a ✕, so "set aside on
-purpose" stays distinguishable from "not yet".
+the day list's dimming go through it. Four reasons reach the UI — explicitly
+ignored, today (not counted until complete), nothing recorded, and before the
+current goal began — each as a tooltip on the row. Only a deliberate exclusion
+also gets a ✕, so "set aside on purpose" stays distinguishable from "not yet".
+
+## The summary covers the current goal
+
+The summary starts the day the goal in force took effect, not N days ago. A
+summary over "the last four weeks" that straddles a switch from maintenance to a
+cut averages two different intentions into one meaningless number — the same
+objection that made targets effective-dated in the first place. With a cut 13
+days old inside a 28-day window, the difference is 2,164 kcal/day over 27 days
+against 1,801 over 13: the first figure describes nothing that was ever aimed
+at.
+
+That start date is `effective_from`, not `created_at` — a target entered
+retroactively took effect when it says it did, which is the whole point of
+backdating one.
+
+Two consequences:
+
+- **The window has to reach back that far.** `/api/days` resolves the target
+  first and stretches `n` to cover it, so the page still boots on one request
+  rather than fetching days, discovering the goal, and fetching again. The
+  ceiling is `MAX_DAYS` (400).
+- **A clamped window must say so.** If the goal predates the ceiling the
+  summary is covering less than its own heading claims, so the page checks
+  whether the oldest day actually reached the goal start and says plainly that
+  earlier days are missing. Silently under-reporting would be the same class of
+  error as the days-with-a-target denominator mismatch.
+
+With no target set at all, none of this applies: the heading stays "Complete
+days" and the summary covers the whole window, as before.
 
 ## Frontend
 

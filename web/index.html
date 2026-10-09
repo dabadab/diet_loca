@@ -541,9 +541,16 @@ function passiveAverage() {
 // normal-looking row that is not, is worse than no marking at all.
 function uncountedReason(d) {
   const today = state.days.length ? state.days[0].date : null;
+  const goal = state.target ? state.target.effective_from : null;
   if (d.ignored) return d.ignored_reason || "deliberately ignored";
   if (d.date === today) return "today is not counted until it is complete";
   if (!(d.meals_logged > 0 || d.energy_out_kcal != null)) return "nothing recorded";
+  // The summary is about the goal in force, so it starts the day that goal took
+  // effect. Scoring a cut against the maintenance weeks before it compares two
+  // different intentions -- the same reason targets are effective-dated at all.
+  // Days before it keep their own figures and their own per-day target; they
+  // are simply not this goal's evidence.
+  if (goal && d.date < goal) return `before the current goal, which starts ${goal}`;
   return null;
 }
 
@@ -815,9 +822,14 @@ function renderRollup() {
 
   box.innerHTML = `
     <div class="block-card">
-      <div class="block-title"><h2>Complete days</h2>
+      <div class="block-title"><h2>${state.target ? "Since the goal" : "Complete days"}</h2>
         <span class="sub">${all.n} days · ${all.intakeDays} with meals · today excluded${
           ignoredCount ? ` · ${ignoredCount} ignored` : ""}</span></div>
+      ${state.target ? `<div class="avg-line" style="margin-top:-2px">since the goal
+        was set on ${esc(state.target.effective_from)}${
+          state.windowTruncated
+            ? ` — only the last ${state.windowDays} days are loaded, so earlier ones are missing`
+            : ""}</div>` : ""}
       ${statsBlock(all)}
       ${scored.length ? `<div class="avg-line" style="margin-top:12px">
         calorie target exceeded on ${overKcal} of ${scored.length} days with a target ·
@@ -1067,6 +1079,12 @@ async function boot() {
   const data = await api(`/api/days?days=${WINDOW_DAYS}`);
   state.days = data.days || [];
   state.target = data.target || null;
+  state.windowDays = data.window_days || state.days.length;
+  // The window stretches to reach the goal start but stops at a ceiling. If it
+  // hit that, the summary is covering less than it claims, and must say so.
+  state.windowTruncated = !!(data.max_days && data.window_days >= data.max_days
+    && state.target && state.days.length
+    && state.days[state.days.length - 1].date > state.target.effective_from);
   el("foot").textContent = state.days.length
     ? `days shown in ${data.timezone}`
     : "no days recorded yet — log a meal through Claude, or run the Garmin sync";
