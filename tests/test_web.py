@@ -8,6 +8,7 @@ The harness lifts the real functions out of the page rather than reimplementing
 them, so a change to the page changes what these tests run.
 """
 
+import datetime as dt
 import json
 import shutil
 import subprocess
@@ -31,6 +32,13 @@ def page(state: dict, calls: dict) -> dict:
         text=True, capture_output=True)
     assert done.returncode == 0, done.stderr
     return json.loads(done.stdout)
+
+
+def days_from(start: str, n: int):
+    """n consecutive ISO dates. September has thirty days, and a fixture that
+    forgets it silently produces unparseable ones."""
+    d0 = dt.date.fromisoformat(start)
+    return [(d0 + dt.timedelta(days=i)).isoformat() for i in range(n)]
 
 
 def day(date, **over):
@@ -243,3 +251,174 @@ class TestDayList:
         assert "2,120" in row, "the projected out, not the raw 780"
         assert "-670" in row, "1450 - 2120, so the row ties up"
         assert str(round(got["out"]["out"])) == "2120"
+
+
+class TestWeightTrend:
+    """The trend is the whole point of the weight chart: a single scale reading
+    is mostly water, gut contents and salt. Two things it has to survive are
+    noise and gaps, so both are asserted rather than assumed."""
+
+    @staticmethod
+    def series(entries):
+        """entries: [(date, kg)] -> day rows carrying those weights."""
+        return [day(d, weight_kg=kg) for d, kg in reversed(entries)]
+
+    def smooth(self, entries, target=None):
+        days = self.series(entries)
+        pts = [{"date": d, "kg": kg, "ignored": False,
+                "t": (dt.date.fromisoformat(d) - dt.date(1970, 1, 1)).days}
+               for d, kg in entries]
+        return page({"days": days, "target": target},
+                    {"pts": ["weightSeries"], "trend": ["smoothWeight", pts]})
+
+    def test_a_flat_series_stays_flat(self):
+        entries = [(f"2026-09-{d:02d}", 80.0) for d in range(1, 15)]
+        got = self.smooth(entries)["trend"]
+        assert all(abs(v - 80.0) < 1e-9 for v in got)
+
+    def test_noise_is_smoothed_far_below_its_input_amplitude(self):
+        """Daily weight swings a kilo on water alone. The trend should not."""
+        entries = [(d, 80.0 + (1.0 if i % 2 else -1.0))
+                   for i, d in enumerate(days_from("2026-09-01", 28))]
+        got = self.smooth(entries)["trend"]
+        spread = max(got) - min(got)
+        assert spread < 0.3, \
+            f"±1 kg of noise should flatten to well under a quarter of it, got {spread:.2f}"
+        assert all(abs(v - 80.0) < 0.2 for v in got), \
+            "including at the ends, which seeding at the fitted line is for"
+
+    def test_the_trend_does_not_lag_a_steady_decline(self):
+        """A one-directional EWMA sits visibly above a falling cloud by about
+        tau, which looks like a bug. The backward pass is what cancels that."""
+        entries = [(f"2026-09-{d:02d}", 85.0 - 0.1 * d) for d in range(1, 29)]
+        got = self.smooth(entries)
+        pts, trend = got["pts"], got["trend"]
+        mid = len(pts) // 2
+        for i in range(mid - 5, mid + 5):
+            assert abs(trend[i] - pts[i]["kg"]) < 0.12, \
+                "the trend should sit on a straight decline, not above it"
+
+    def test_a_gap_is_weighted_by_elapsed_time_not_by_sample_count(self):
+        """Two readings either side of a three-week gap are not 'one step'
+        apart. With a count-based EWMA the later reading would barely move the
+        line; it should dominate."""
+        entries = [("2026-09-01", 80.0), ("2026-09-02", 80.0),
+                   ("2026-09-03", 80.0), ("2026-09-24", 86.0)]
+        trend = self.smooth(entries)["trend"]
+        assert trend[-1] > 85.0, \
+            f"after a 21-day gap the new reading should dominate, got {trend[-1]:.2f}"
+
+    def test_a_close_pair_of_readings_is_averaged_not_jumped_between(self):
+        """The mirror of the gap case: two readings a day apart are nearly the
+        same evidence, so one outlier among them must not carry the line."""
+        entries = [("2026-09-01", 80.0), ("2026-09-02", 80.0),
+                   ("2026-09-03", 83.0), ("2026-09-04", 80.0)]
+        trend = self.smooth(entries)["trend"]
+        assert trend[2] < 81.5, f"a one-day spike should be damped, got {trend[2]:.2f}"
+
+    def test_a_straight_decline_is_reproduced_exactly(self):
+        """The bug this ordering exists to prevent: smoothing a sloped series
+        directly pulled both ends toward the centre, which flattened the line
+        and the rate with it."""
+        entries = [(f"2026-09-{d:02d}", 85.0 - 0.1 * d) for d in range(1, 29)]
+        got = self.smooth(entries)
+        for i, p in enumerate(got["pts"]):
+            assert abs(got["trend"][i] - p["kg"]) < 1e-6, \
+                f"index {i} off by {got['trend'][i] - p['kg']:.3f}"
+
+    def test_a_single_reading_is_its_own_trend(self):
+        assert self.smooth([("2026-09-01", 80.0)])["trend"] == [80.0]
+
+    def test_no_readings_yields_no_trend(self):
+        assert self.smooth([])["trend"] == []
+
+
+class TestWeightChart:
+    def test_only_weights_since_the_goal_are_plotted(self):
+        days = [day("2026-09-20", weight_kg=79.0), day("2026-09-19", weight_kg=79.5),
+                day("2026-09-13", weight_kg=82.0)]
+        target = {"effective_from": "2026-09-14", "kcal": 1800,
+                  "protein_g": 150.0, "note": None}
+        got = page({"days": days, "target": target}, {"pts": ["weightSeries"]})["pts"]
+        assert [p["date"] for p in got] == ["2026-09-19", "2026-09-20"]
+
+    def test_a_weight_on_an_ignored_day_is_kept_but_marked(self):
+        """Ignoring a day says "do not average my calories", not "I did not
+        weigh this much" -- dropping it would put a hole in the trend."""
+        days = [day("2026-09-20", weight_kg=79.0),
+                day("2026-09-19", weight_kg=79.5, ignored=True,
+                    ignored_reason="holiday")]
+        got = page({"days": days, "target": None}, {"pts": ["weightSeries"]})["pts"]
+        assert [p["ignored"] for p in got] == [True, False]
+
+    def test_the_rate_is_reported_per_week_and_signed(self):
+        entries = [(f"2026-09-{d:02d}", 85.0 - 0.1 * d) for d in range(1, 29)]
+        days = [day(d, weight_kg=kg) for d, kg in reversed(entries)]
+        html = page({"days": days, "target": None}, {"h": ["weightChart"]})["h"]
+        assert "kg</b> a week" in html
+        assert "−0.7" in html, "0.1 kg a day is 0.7 a week"
+        assert 'class="neg"' in html, "losing weight should read as the good direction"
+
+    def test_the_rate_survives_heavy_noise(self):
+        """Reading the rate off the smoothed line instead of fitting the
+        readings came out a third low on a clean ramp; this is the noisy case."""
+        entries = [(d, 82.0 - 0.07 * i + (0.9 if i % 2 else -0.9))
+                   for i, d in enumerate(days_from("2026-08-20", 40))]
+        days = [day(d, weight_kg=kg) for d, kg in reversed(entries)]
+        got = page({"days": days, "target": None},
+                   {"pts": ["weightSeries"]})
+        rate = page({"days": days, "target": None},
+                    {"r": ["weightRate", got["pts"]]})["r"]
+        assert abs(rate - (-0.49)) < 0.05, f"true -0.49 kg/week, got {rate:.3f}"
+
+    def test_a_rate_is_withheld_under_a_week(self):
+        """Over three days the slope is mostly noise and would swing wildly."""
+        days = [day(f"2026-09-{d:02d}", weight_kg=80.0) for d in (3, 2, 1)]
+        html = page({"days": days, "target": None}, {"h": ["weightChart"]})["h"]
+        assert "a week" not in html
+
+    def test_fewer_than_two_weigh_ins_says_so_instead_of_drawing_a_chart(self):
+        one = page({"days": [day("2026-09-20", weight_kg=80.0)], "target": None},
+                   {"h": ["weightChart"]})["h"]
+        assert "<svg" not in one and "at least two" in one
+        none = page({"days": [day("2026-09-20")], "target": None},
+                    {"h": ["weightChart"]})["h"]
+        assert "<svg" not in none and "No weigh-ins" in none
+
+    def test_a_nearly_flat_series_is_not_magnified_into_mountains(self):
+        """Over a flat fortnight the real range can be 300 g. Scaling to the
+        extremes would turn that into a dramatic profile of pure noise."""
+        entries = [(f"2026-09-{d:02d}", 80.0 + (0.1 if d % 2 else -0.1))
+                   for d in range(1, 15)]
+        days = [day(d, weight_kg=kg) for d, kg in reversed(entries)]
+        geo = page({"days": days, "target": None},
+                   {"pts": ["weightSeries"]})
+        span = page({"days": days, "target": None},
+                    {"g": ["weightGeometry",
+                           geo["pts"],
+                           [80.0] * len(geo["pts"])]})["g"]["span"]
+        assert span >= 1.5, f"the y-span should have a floor, got {span}"
+
+    def test_the_chart_carries_an_accessible_label(self):
+        entries = [(f"2026-09-{d:02d}", 80.0 - 0.05 * d) for d in range(1, 20)]
+        days = [day(d, weight_kg=kg) for d, kg in reversed(entries)]
+        html = page({"days": days, "target": None}, {"h": ["weightChart"]})["h"]
+        assert 'role="img"' in html and "aria-label" in html
+
+
+def test_the_whole_summary_renders_with_a_weight_series():
+    """An integration check over renderRollup itself. The unit tests each call
+    one function, so a name that only the assembled page reaches -- a helper
+    left out of a refactor, say -- goes unnoticed until someone opens the tab."""
+    entries = list(zip(days_from("2026-08-20", 40),
+                       [80.0 - 0.05 * i + (0.4 if i % 2 else -0.4) for i in range(40)]))
+    rows = [day(d, weight_kg=kg) for d, kg in reversed(entries)]
+    target = {"effective_from": "2026-08-25", "kcal": 1800,
+              "protein_g": 150.0, "note": "cut"}
+    html = page({"days": rows, "target": target, "windowDays": 40,
+                 "windowTruncated": False}, {"h": ["renderRollup"]})
+    # renderRollup writes into the box rather than returning, so assert via the
+    # pieces it is made of instead.
+    chart = page({"days": rows, "target": target}, {"h": ["weightChart"]})["h"]
+    assert "<svg" in chart and "Weight" in chart
+    assert "a week" in chart

@@ -29,14 +29,21 @@ function fnSource(name) {
 
 // The small formatting helpers are consts, not functions.
 const helpers = src.split("\n").filter((l) =>
-  /^const (esc|n0|n1) = /.test(l) || l.startsWith('  (c) => ({ "&"')).join("\n");
+  /^const (esc|n0|n1|W_TREND|W_DOT|W_BOX|TREND_TAU_DAYS) = /.test(l)
+  || l.startsWith('  (c) => ({ "&"')).join("\n");
 
 const WANTED = ["uncountedKind", "uncountedReason", "uncountedSummary",
                 "passiveAverage", "outFor", "partialNote", "statsFor", "stat",
-                "avgRow", "bar", "statsBlock", "dayListCard", "renderRollup"];
+                "avgRow", "bar", "statsBlock", "dayListCard", "renderRollup",
+                "weightSeries", "weightFit", "smoothWeight", "weightRate", "weightGeometry",
+                "chartWidth", "wireWeightChart",
+                "weightChart", "shortDate"];
 
 globalThis.state = input.state;
-globalThis.el = () => ({ innerHTML: "" });
+// Enough of an element for the render functions to write into. querySelector
+// returns null so the hover wiring bows out the way it does for a chart that
+// was not drawn -- node has no layout, so there is nothing to attach to.
+globalThis.el = () => ({ innerHTML: "", querySelector: () => null });
 eval(helpers + "\n" + WANTED.map(fnSource).join("\n"));
 
 const api = Object.fromEntries(WANTED.map((n) => [n, eval(n)]));

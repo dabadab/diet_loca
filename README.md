@@ -140,6 +140,12 @@ effect, so switching from maintenance to a cut starts the scoring over instead
 of blending the two. Days before it stay in the day list with their own figures,
 dimmed, like any other day that is not counted.
 
+The Summary also charts weight over the goal period, with a trend line. Scale
+readings are noisy and arrive with gaps, so the trend fits a line, smooths what
+is left on a ten-day *time* constant — a reading after a week away counts for
+what its distance earns, not as one more step — and adds the line back. The
+headline is the fitted rate in kg per week.
+
 Ask Claude to leave a day out of the averages — "ignore Monday, I had food
 poisoning" — and it stays in the day list with its real figures, dimmed and
 marked, but out of every summary. The reason is required, because it is the

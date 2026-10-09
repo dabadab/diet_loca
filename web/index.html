@@ -218,6 +218,24 @@
   table.days tr.day-row.uncounted td { opacity: 0.45; }
   table.days tr.day-row.uncounted:hover td,
   table.days tr.day-row.uncounted.active td { opacity: 0.75; }
+  /* Scales uniformly: stretching x alone to fill would squash the dots into
+     ellipses and thin the 2px trend line on a narrow screen. The viewBox keeps
+     the axis band inside it, so height:auto grows the card to include the date
+     labels rather than nesting a scrollbar around a too-short plot. */
+  .weight-chart { width: 100%; height: auto; display: block; margin: 4px 0 2px; }
+  /* `hidden` is an HTML attribute; SVG does not honour it on its own. */
+  .weight-chart .ch-hover[hidden] { display: none; }
+  .ch-tick {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px;
+    fill: var(--ink-soft);
+  }
+  .ch-end {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px;
+    fill: var(--ink); font-weight: 600;
+  }
+  .ch-surface { cursor: crosshair; }
+  .ch-readout { font-size: 0.82rem; color: var(--ink-soft); margin-top: 2px; }
+  .ch-readout b { color: var(--ink); font-weight: 600; }
   .ignored-mark {
     color: var(--tomato); font-weight: 700; margin-left: 6px; font-size: 0.8em;
   }
@@ -732,6 +750,259 @@ async function loadDetail(date) {
 // they are days with no intake. Averaging them in invents a deficit, so each
 // figure is averaged over only the days that actually carry it, and the counts
 // are shown.
+// ------------------------------------------------------------ weight ----
+// Scale weight is noisy -- a kilo of it is water, gut contents and salt, which
+// is why a single reading says almost nothing and people weigh daily anyway.
+// The trend is what the chart is for; the readings are the context it sits in.
+
+const TREND_TAU_DAYS = 10;   // the smoothing horizon, in days rather than readings
+
+function weightSeries() {
+  // Weights since the goal took effect, oldest first, one per day. Readings on
+  // an ignored day are kept: ignoring a day says "do not average my calories",
+  // not "I did not weigh this much", and dropping them would put a hole in the
+  // trend for the fortnight someone was on holiday. They are drawn fainter, the
+  // way the day list dims them.
+  const goal = state.target ? state.target.effective_from : null;
+  return state.days
+    .filter((d) => d.weight_kg != null && (!goal || d.date >= goal))
+    .map((d) => ({ date: d.date, kg: d.weight_kg, ignored: !!d.ignored,
+                   t: Date.parse(d.date + "T12:00:00Z") / 86400000 }))
+    .sort((a, b) => a.t - b.t);
+}
+
+// The trend. Three steps, and the order is the whole trick.
+//
+//   1. Fit a straight line to the readings by least squares.
+//   2. Smooth what is left over -- the residuals -- with an exponential filter
+//      whose constant is a number of *days*, not a number of readings.
+//   3. Add the line back.
+//
+// Step 2 alone is the classic weight-trend filter and handles **noise**: a
+// kilo of a daily reading is water, gut contents and salt, and exponential
+// smoothing is the standard answer, used by weight-trend tools for decades.
+// Deriving its alpha from elapsed time handles **gaps**:
+//
+//   alpha = 1 - exp(-dt / tau)
+//
+// A plain EWMA counts "yesterday" and "three weeks ago" as one step each, so a
+// reading after a holiday barely moves the line. Elapsed time gives a reading
+// exactly the weight its distance earns, and a gap of several tau hands the new
+// value almost all of it.
+//
+// Steps 1 and 3 exist because of what step 2 does to a *slope*. Run forwards,
+// an exponential filter lags; run backwards it leads; averaging the two cancels
+// the lag in the middle but not at the ends, where one direction has no history
+// to have lagged. Measured on a steady 0.1 kg/day decline that pulled both ends
+// 0.44 kg towards the centre and flattened the reported rate from 0.70 kg/week
+// to 0.47 -- a third of the number someone is actually watching. Detrending
+// first leaves the filter nothing but noise to smooth, where it has no lag to
+// cancel: the same test then comes out at 0.000 kg of end error and exactly
+// 0.70 kg/week. Curvature still rides in the residuals and is still smoothed,
+// so a plateau followed by a drop keeps its shape.
+function weightFit(points) {
+  const n = points.length;
+  const meanT = points.reduce((a, p) => a + p.t, 0) / n;
+  const meanY = points.reduce((a, p) => a + p.kg, 0) / n;
+  let num = 0, den = 0;
+  for (const p of points) {
+    num += (p.t - meanT) * (p.kg - meanY);
+    den += (p.t - meanT) ** 2;
+  }
+  const slope = den ? num / den : 0;
+  return { slope, intercept: meanY - slope * meanT };
+}
+
+function smoothWeight(points, tau = TREND_TAU_DAYS) {
+  const n = points.length;
+  if (!n) return [];
+  if (n === 1) return [points[0].kg];
+
+  const { slope, intercept } = weightFit(points);
+  const line = (t) => intercept + slope * t;
+  const resid = points.map((p) => p.kg - line(p.t));
+
+  const pass = (idx) => {
+    const out = new Array(n);
+    let prev = null;
+    for (const i of idx) {
+      // Seeded at the fitted line, not at the first reading. The residuals are
+      // zero-mean by construction, so zero is what a point with no history
+      // behind it should assume; seeding with that point's own noise instead
+      // started each pass half a kilo out and took a tau to relax, which is
+      // five times the wobble at the ends of the drawn line.
+      if (prev === null) { out[i] = 0; prev = i; continue; }
+      const dt = Math.abs(points[i].t - points[prev].t);
+      const alpha = dt > 0 ? 1 - Math.exp(-dt / tau) : 1;
+      out[i] = out[prev] + alpha * (resid[i] - out[prev]);
+      prev = i;
+    }
+    return out;
+  };
+  const fwd = pass([...points.keys()]);
+  const back = pass([...points.keys()].reverse());
+  return points.map((p, i) => line(p.t) + (fwd[i] + back[i]) / 2);
+}
+
+// Kilos per week: the fitted slope, which is what the readings as a whole say
+// rather than what the last one did. Reading it off the smoothed line instead
+// would inherit that line's end effects, which is how it came out a third low.
+function weightRate(points) {
+  if (points.length < 2) return null;
+  // Under a week the slope is mostly noise and swings wildly; better to say
+  // nothing than to print a confident number that will be different tomorrow.
+  if (points[points.length - 1].t - points[0].t < 7) return null;
+  return weightFit(points).slope * 7;
+}
+
+
+// Emphasis, not two series: the trend is the subject and the readings are the
+// cloud it is drawn through, so one hue carries the line and a recessive warm
+// gray carries the dots. The pair was checked rather than eyeballed -- leaf
+// against the page's own --ink-soft came out at dE 6.6, close enough to be
+// genuinely hard to tell apart, so the dots are a lighter step (dE 21.4).
+const W_TREND = "#4A6B3D";        // --leaf, as the deficit figures already use
+const W_DOT = "#A89C7E";
+
+// One definition of the plot's geometry, so the drawn chart and the crosshair
+// that reads it cannot end up on different scales.
+const W_BOX = { W: 700, H: 190, L: 44, R: 58, T: 14, B: 26 };
+
+// The viewBox is sized to the space the card actually has, so one unit is one
+// pixel and nothing is scaled. Letting a fixed 700-unit box stretch to fit
+// instead meant that on a phone the axis labels came out around five pixels
+// tall -- scaling shrinks text along with everything else.
+function chartWidth() {
+  const box = typeof document === "undefined" ? null : el("rollupView");
+  const avail = box ? box.clientWidth - 36 : 0;   // the card's own padding
+  return Math.max(300, Math.round(avail || W_BOX.W));
+}
+
+function weightGeometry(pts, trend, width = W_BOX.W) {
+  const { H, L, R, T, B } = W_BOX;
+  const W = width;
+  const t0 = pts[0].t, t1 = pts[pts.length - 1].t;
+  const lo = Math.min(...pts.map((p) => p.kg), ...trend);
+  const hi = Math.max(...pts.map((p) => p.kg), ...trend);
+  // A floor on the span: over a flat fortnight the real range can be 300 g, and
+  // without this the chart would magnify that into a mountain profile.
+  const mid = (lo + hi) / 2, span = Math.max(hi - lo, 1.5) * 1.18;
+  const yLo = mid - span / 2, yHi = mid + span / 2;
+  // Clean kg gridlines rather than whatever the extremes happen to be.
+  const step = span > 8 ? 2 : span > 4 ? 1 : 0.5;
+  const ticks = [];
+  for (let v = Math.ceil(yLo / step) * step; v <= yHi; v += step) ticks.push(v);
+  return {
+    ...W_BOX, W, ticks, span,
+    x: (t) => L + (t1 === t0 ? 0 : (t - t0) / (t1 - t0)) * (W - L - R),
+    y: (kg) => T + (1 - (kg - yLo) / (yHi - yLo)) * (H - T - B),
+  };
+}
+
+function weightChart(width = W_BOX.W) {
+  const pts = weightSeries();
+  if (pts.length < 2) {
+    return `<div class="block-card"><div class="block-title"><h2>Weight</h2></div>
+      <div class="empty-note">${pts.length
+        ? "One weigh-in so far — a trend needs at least two."
+        : "No weigh-ins recorded in this period."}</div></div>`;
+  }
+  const trend = smoothWeight(pts);
+  const rate = weightRate(pts);
+  const { W, H, L, R, T, B, x, y, ticks } = weightGeometry(pts, trend, width);
+
+  const grid = ticks.map((v) => `
+    <line x1="${L}" y1="${y(v).toFixed(1)}" x2="${W - R}" y2="${y(v).toFixed(1)}"
+          stroke="var(--paper-line)" stroke-width="1"/>
+    <text x="${L - 8}" y="${(y(v) + 4).toFixed(1)}" text-anchor="end"
+          class="ch-tick">${n1(v)}</text>`).join("");
+
+  const dots = pts.map((p) => `<circle cx="${x(p.t).toFixed(1)}" cy="${y(p.kg).toFixed(1)}"
+      r="2.6" fill="${W_DOT}"${p.ignored ? ' opacity="0.4"' : ""}/>`).join("");
+
+  const path = pts.map((p, i) =>
+    `${i ? "L" : "M"}${x(p.t).toFixed(1)} ${y(trend[i]).toFixed(1)}`).join(" ");
+
+  const last = pts[pts.length - 1], lastY = y(trend[trend.length - 1]);
+  const dates = [pts[0], last].map((p, i) => `
+    <text x="${i ? W - R : L}" y="${H - 6}" text-anchor="${i ? "end" : "start"}"
+          class="ch-tick">${shortDate(p.date)}</text>`).join("");
+
+  return `<div class="block-card">
+    <div class="block-title"><h2>Weight</h2>
+      <span class="sub">${pts.length} weigh-in${pts.length === 1 ? "" : "s"}${
+        rate != null ? ` · <b class="${rate <= 0 ? "neg" : "pos"}">${
+          rate > 0 ? "+" : "−"}${n1(Math.abs(rate))} kg</b> a week` : ""}</span></div>
+    <svg class="weight-chart" viewBox="0 0 ${W} ${H}"
+         role="img" aria-label="Weight over the period, with a ${TREND_TAU_DAYS}-day trend">
+      ${grid}${dates}
+      ${dots}
+      <path d="${path}" fill="none" stroke="${W_TREND}" stroke-width="2"
+            stroke-linejoin="round" stroke-linecap="round"/>
+      <circle cx="${x(last.t).toFixed(1)}" cy="${lastY.toFixed(1)}" r="4"
+              fill="${W_TREND}" stroke="var(--card)" stroke-width="2"/>
+      <text x="${W - R + 8}" y="${(lastY + 4).toFixed(1)}" class="ch-end">${
+        n1(trend[trend.length - 1])}</text>
+      <g class="ch-hover" hidden>
+        <line y1="${T}" y2="${H - B}" stroke="var(--ink-soft)" stroke-width="1"/>
+        <circle r="4" fill="none" stroke="${W_TREND}" stroke-width="2"/>
+      </g>
+      <rect x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}"
+            fill="transparent" class="ch-surface"/>
+    </svg>
+    <div class="ch-readout">trend <b>${n1(trend[trend.length - 1])}</b> kg${
+      rate != null ? ` · smoothed over ${TREND_TAU_DAYS} days` : ""}</div>
+  </div>`;
+}
+
+// A line chart that cannot be interrogated makes the reader guess at values
+// between the two labelled ends. The crosshair snaps to the nearest reading --
+// landing on a 2.6px dot with a mouse is not a reasonable thing to ask -- and
+// the readout under the chart carries the numbers, so nothing is gated behind
+// hovering: the Days tab lists every weigh-in as a table.
+function wireWeightChart(box) {
+  const svg = box.querySelector(".weight-chart");
+  if (!svg) return;
+  const pts = weightSeries();
+  if (pts.length < 2) return;
+  const trend = smoothWeight(pts);
+  const { W, x, y } = weightGeometry(pts, trend,
+    Number(svg.getAttribute("viewBox").split(" ")[2]));
+  const hover = svg.querySelector(".ch-hover");
+  const [line, dot] = [hover.querySelector("line"), hover.querySelector("circle")];
+  const readout = box.querySelector(".ch-readout");
+  const base = readout.innerHTML;
+
+  svg.querySelector(".ch-surface").addEventListener("mousemove", (ev) => {
+    const r = svg.getBoundingClientRect();
+    const vx = ((ev.clientX - r.left) / r.width) * W;
+    let best = 0;
+    pts.forEach((p, i) => {
+      if (Math.abs(x(p.t) - vx) < Math.abs(x(pts[best].t) - vx)) best = i;
+    });
+    const p = pts[best];
+    line.setAttribute("x1", x(p.t));
+    line.setAttribute("x2", x(p.t));
+    dot.setAttribute("cx", x(p.t));
+    dot.setAttribute("cy", y(trend[best]));
+    hover.hidden = false;
+    readout.innerHTML = `${esc(shortDate(p.date))} · measured <b>${n1(p.kg)}</b> kg`
+      + ` · trend <b>${n1(trend[best])}</b> kg`
+      + (p.ignored ? ' <span class="muted">(day not counted)</span>' : "");
+  });
+  svg.querySelector(".ch-surface").addEventListener("mouseleave", () => {
+    hover.hidden = true;
+    readout.innerHTML = base;
+  });
+}
+
+
+function shortDate(iso) {
+  return new Date(iso + "T12:00:00").toLocaleDateString(undefined,
+    { month: "short", day: "numeric" });
+}
+
+
 function statsFor(list) {
   const add = (xs, k) => xs.reduce((a, d) => a + (d[k] || 0), 0);
   const withIntake = list.filter((d) => d.energy_in_kcal != null);
@@ -851,7 +1122,6 @@ function renderRollup() {
   const scored = withIntake.filter((d) => d.target_kcal != null);
   const overKcal = scored.filter((d) => d.energy_in_kcal > d.target_kcal).length;
   const hitProtein = scored.filter((d) => (d.protein_g || 0) >= (d.target_protein_g || 0)).length;
-  const weights = recorded.filter((d) => d.weight_kg != null);
 
   box.innerHTML = `
     <div class="block-card">
@@ -869,11 +1139,11 @@ function renderRollup() {
       ${scored.length ? `<div class="avg-line" style="margin-top:12px">
         calorie target exceeded on ${overKcal} of ${scored.length} days with a target ·
         protein target met on ${hitProtein} of ${scored.length}</div>` : ""}
-      ${weights.length >= 2 ? `<div class="avg-line">
-        weight ${n1(weights[weights.length - 1].weight_kg)} kg → ${n1(weights[0].weight_kg)} kg
-        over ${weights.length} weigh-ins</div>` : ""}
     </div>
+    ${weightChart(chartWidth())}
     ${weekCards}`;
+
+  wireWeightChart(box);
 }
 
 async function refreshHealth() {

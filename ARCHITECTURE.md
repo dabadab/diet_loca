@@ -455,6 +455,61 @@ pointed at Postgres later for the user's own ad-hoc charts if wanted — that's
 free given the existing Grafana/VictoriaMetrics setup — but it's not the
 primary UI.
 
+## The weight chart
+
+On the Summary tab, over the same window as everything else there: since the
+goal took effect. No backend change was needed — `/api/days` already stretches
+its window to the goal start and already carries `weight_kg` per day.
+
+**The trend is three steps, and the order is the point.** Fit a straight line by
+least squares; smooth the *residuals* with an exponential filter; add the line
+back.
+
+Step two alone is the classic weight-trend filter and handles **noise** — a kilo
+of any single reading is water, gut contents and salt. Its alpha comes from
+elapsed days rather than a sample count, which is what handles **gaps**:
+`alpha = 1 - exp(-dt / tau)`, tau = 10 days. A plain EWMA counts "yesterday" and
+"three weeks ago" as one step each, so a reading after a holiday barely moves the
+line; elapsed time gives each reading exactly the weight its distance earns.
+
+Steps one and three exist because of what smoothing does to a *slope*. Run
+forwards an exponential filter lags, backwards it leads, and averaging the two
+cancels the lag in the middle but not at the ends, where one direction has no
+history to have lagged. Measured on a steady 0.1 kg/day decline that pulled both
+ends 0.44 kg toward the centre and flattened the reported rate from 0.70 kg/week
+to 0.47 — a third off the number someone is actually watching. Detrending first
+leaves the filter nothing but noise, where it has no lag to cancel: the same
+test then gives 0.000 kg of end error and exactly 0.70 kg/week. Curvature still
+rides in the residuals and is still smoothed, so a plateau followed by a drop
+keeps its shape.
+
+Two smaller decisions, both measured rather than guessed:
+
+- Each pass is **seeded at the fitted line, not at the first reading**. The
+  residuals are zero-mean by construction, so zero is the right prior for a
+  point with no history; seeding with that point's own noise started each pass
+  half a kilo out and took a tau to relax — five times the wobble at the ends.
+- The **rate is the fitted slope**, not the smoothed line's endpoints, for the
+  same end-effect reason. It is withheld under a week, where slope is mostly
+  noise.
+
+Weights on an **ignored** day are plotted (dimmed, as the day list dims them):
+ignoring a day says "do not average my calories", not "I did not weigh this
+much", and dropping them would put a hole in the trend for exactly the fortnight
+someone was away. The old "weight A → B over N weigh-ins" line was removed from
+the summary card when this landed — it counted only counted days, so it sat
+beside the chart advertising a different number of weigh-ins.
+
+Drawing notes: it is an **emphasis** chart, not two series — the trend is the
+subject and the readings are the cloud it runs through, so one hue carries the
+line and a recessive warm gray the dots. That pair was checked rather than
+eyeballed; the page's own `--ink-soft` against `--leaf` came out at dE 6.6,
+genuinely hard to tell apart, so the dots are a lighter step at dE 21.4. The
+viewBox is sized to the card's measured width so one unit is one pixel —
+stretching a fixed box to fit shrank the axis labels to about five pixels on a
+phone. The y-span has a 1.5 kg floor, because a flat fortnight has a real range
+of about 300 g and scaling to the extremes turns that into a mountain profile.
+
 ## Tests
 
 `tests/`, pytest, against a real cluster rather than a mocked cursor — almost
