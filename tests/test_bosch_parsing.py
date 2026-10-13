@@ -256,3 +256,119 @@ class TestClientPreflight:
             monkeypatch.delenv("BOSCH_CLIENT_ID")
             monkeypatch.delenv("BOSCH_REDIRECT_URI")
             importlib.reload(bosch)
+
+
+class TestLocalCallback:
+    """
+    A client registered at Bosch's Data Act portal nominates its own recipient
+    URL, so it can be localhost -- which a browser will actually follow, unlike
+    the app client's mobile scheme. That is what removes the devtools step, so
+    it is worth a test that really binds a socket.
+    """
+
+    @staticmethod
+    def _with_port(monkeypatch, port):
+        import importlib
+        monkeypatch.setenv("BOSCH_CLIENT_ID", "test-client")
+        monkeypatch.setenv("BOSCH_REDIRECT_URI", f"http://localhost:{port}")
+        return importlib.reload(bosch)
+
+    @staticmethod
+    def _free_port():
+        import socket
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    def _run(self, mod, timeout=15):
+        import threading
+        out = {}
+
+        def go():
+            try:
+                out["code"] = mod.listen_for_code(timeout=timeout)
+            except Exception as exc:
+                out["err"] = exc
+        t = threading.Thread(target=go)
+        t.start()
+        return out, t
+
+    def _visit(self, port, path):
+        import urllib.request
+        import time
+        for _ in range(40):                      # the server may still be binding
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}",
+                                            timeout=3) as r:
+                    return r.read().decode()
+            except Exception:
+                time.sleep(0.05)
+        raise AssertionError("the callback server never came up")
+
+    def test_the_code_is_caught_off_the_callback(self, monkeypatch):
+        port = self._free_port()
+        mod = self._with_port(monkeypatch, port)
+        try:
+            out, t = self._run(mod)
+            page = self._visit(port, "/cb?code=THE-CODE&state=x")
+            t.join(20)
+            assert out.get("code") == "THE-CODE", out
+            assert "close this tab" in page, "the browser needs telling it worked"
+        finally:
+            monkeypatch.undo()
+            __import__("importlib").reload(bosch)
+
+    def test_a_favicon_request_does_not_end_the_wait(self, monkeypatch):
+        """Browsers ask for one unprompted. Treating any request as the callback
+        would abandon the login a moment before the real one arrives."""
+        port = self._free_port()
+        mod = self._with_port(monkeypatch, port)
+        try:
+            out, t = self._run(mod)
+            self._visit(port, "/favicon.ico")
+            page = self._visit(port, "/cb?code=LATE&state=x")
+            t.join(20)
+            assert out.get("code") == "LATE", out
+        finally:
+            monkeypatch.undo()
+            __import__("importlib").reload(bosch)
+
+    def test_a_refusal_is_reported_as_one_not_as_a_timeout(self, monkeypatch):
+        port = self._free_port()
+        mod = self._with_port(monkeypatch, port)
+        try:
+            out, t = self._run(mod)
+            self._visit(port, "/cb?error=access_denied&error_description=user+cancelled")
+            t.join(20)
+            assert isinstance(out.get("err"), bosch.BoschError)
+            assert "user cancelled" in str(out["err"])
+        finally:
+            monkeypatch.undo()
+            __import__("importlib").reload(bosch)
+
+    def test_a_port_already_in_use_says_so_plainly(self, monkeypatch):
+        import socket
+        held = socket.socket()
+        held.bind(("127.0.0.1", 0))
+        held.listen(1)
+        port = held.getsockname()[1]
+        mod = self._with_port(monkeypatch, port)
+        try:
+            with pytest.raises(bosch.BoschError, match="could not listen"):
+                mod.listen_for_code(timeout=2)
+        finally:
+            held.close()
+            monkeypatch.undo()
+            __import__("importlib").reload(bosch)
+
+    def test_the_route_decides_whether_a_browser_can_follow_the_redirect(
+            self, monkeypatch):
+        mod = self._with_port(monkeypatch, 4200)
+        try:
+            assert mod.uses_local_callback() is True
+            assert mod.API_BASE == mod.DATA_ACT_HOST
+        finally:
+            monkeypatch.undo()
+            __import__("importlib").reload(bosch)
+        assert bosch.uses_local_callback() is False, \
+            "the app client's mobile scheme still needs the paste"

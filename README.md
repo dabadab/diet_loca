@@ -142,9 +142,13 @@ dimmed, like any other day that is not counted.
 
 Ebike rides come from **Bosch Flow** as well, where the motor measures the
 rider's own pedal torque — so its calories are measured rather than guessed from
-heart rate, which overstates an assisted ride. Connect one with
-`manage.py bosch-login <email>`; it needs a browser once, because the Flow app's
-OAuth redirect is a mobile scheme a desktop cannot follow.
+heart rate, which overstates an assisted ride.
+
+Bosch publishes no API, and the Flow app's own client id is no longer accepted,
+so this goes through the **EU Data Act**: register a client of your own at
+[portal.bosch-ebike.com/data-act](https://portal.bosch-ebike.com/data-act), put
+its id in `BOSCH_CLIENT_ID`, and run `manage.py bosch-login <email>` once on the
+machine your browser is on. It catches the callback itself.
 
 A ride both devices saw appears twice, and `in_expenditure` says which rows the
 day's energy figures already contain — `false` means nothing counted that effort

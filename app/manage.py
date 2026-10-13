@@ -357,29 +357,37 @@ def cmd_bosch_login(args) -> None:
     except bosch.NeedsLogin as exc:
         sys.exit(f"{exc}")
 
-    # A browser never makes a *network request* to onebikeapp-ios:// -- it hands
-    # the URL to the operating system -- so there is no such row in the network
-    # panel to go looking for. What is there is the ordinary HTTP 302 that tries
-    # to send the browser there, and the URL sits in its Location header.
-    print("\n1. Open devtools FIRST (F12), go to the Network tab, and tick")
-    print("   'Preserve log'. Without it the entries vanish at the last step.\n")
-    print("2. Open this and sign in with your Bosch SingleKey ID:\n")
-    print(f"   {url}\n")
-    print("3. At the end the browser will refuse to open an app, or show an")
-    print("   'open in app?' dialog, or just appear to stall. All expected.\n")
-    print("4. In the Network tab, scroll to the BOTTOM and find the last")
-    print("   singlekey-id.com request with status 302. Click it, open the")
-    print("   Headers tab, and under Response Headers copy the whole value of")
-    print("   'location:' -- it starts onebikeapp-ios://\n")
-    print("   There is no onebikeapp-ios:// row of its own; a custom scheme is")
-    print("   handed to the OS, not fetched, so only the 302 that points at it")
-    print("   shows up here.\n")
-    print("   If you can see the code but not the whole URL, just paste the")
-    print("   code on its own -- that is all this needs.\n")
-    redirect = input("5. Paste it here: ").strip()
+    if bosch.uses_local_callback():
+        # A registered client nominates its own recipient URL, so it can be
+        # localhost -- which the browser will actually follow. No copy-paste.
+        print(f"\nOpen this and sign in with your SingleKey ID:\n")
+        print(f"   {url}\n")
+        print(f"Waiting for the callback on {bosch.REDIRECT_URI} ...")
+        print("(this has to run where your browser is, not inside the container)")
+        try:
+            code = bosch.listen_for_code()
+        except bosch.BoschError as exc:
+            sys.exit(f"Bosch login failed: {exc}")
+    else:
+        # The app's own client uses a mobile scheme no desktop browser follows,
+        # so the redirect has to be fished out by hand. A browser never makes a
+        # network request to it -- it hands the URL to the OS -- so there is no
+        # such row in the network panel; what is there is the 302 that points
+        # at it, with the URL in its location header.
+        print("\n1. Open devtools FIRST (F12), Network tab, tick 'Preserve log'.\n")
+        print("2. Open this and sign in with your Bosch SingleKey ID:\n")
+        print(f"   {url}\n")
+        print("3. At the end the browser refuses to open an app. Expected.\n")
+        print("4. In Network, find the LAST singlekey-id.com request with status")
+        print("   302, and copy the whole 'location:' response header.")
+        print("   Just the code on its own is fine too.\n")
+        redirect = input("5. Paste it here: ").strip()
+        try:
+            code = bosch.code_from_redirect(redirect)
+        except bosch.BoschError as exc:
+            sys.exit(f"Bosch login failed: {exc}")
 
     try:
-        code = bosch.code_from_redirect(redirect)
         tokens = bosch.exchange_code(code, verifier)
     except bosch.BoschError as exc:
         sys.exit(f"Bosch login failed: {exc}")
@@ -434,6 +442,16 @@ def cmd_bosch_probe(args) -> None:
 
     session = bosch.resume(secretbox.decrypt(row["secret_ciphertext"], row["key_id"]))
     today = date.today()
+    if args.path:
+        # Bosch documents the Data Act API only to registered recipients, so the
+        # ride endpoint cannot be known from here. This is how it gets found:
+        # try what the portal's documentation says and look at what comes back.
+        import json as _json
+        payload = session.get(bosch.API_BASE + args.path,
+                              **{"from": (today - timedelta(days=args.days)).isoformat(),
+                                 "to": today.isoformat()})
+        print(_json.dumps(payload, indent=2, default=str)[:4000])
+        return
     lines = bosch.probe(session, today - timedelta(days=args.days), today)
     if not lines:
         sys.exit(f"no rides returned for the last {args.days} days")
@@ -572,6 +590,9 @@ def main() -> None:
     bp.add_argument("email")
     bp.add_argument("--days", type=int, default=30,
                     help="how far back to look for a ride (default 30)")
+    bp.add_argument("--path", default=None,
+                    help="raw request against this API path, for finding the "
+                         "ride endpoint from the portal's documentation")
     bp.set_defaults(fn=cmd_bosch_probe)
 
     bf = sub.add_parser("bosch-forget", help="delete stored Bosch tokens")

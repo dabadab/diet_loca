@@ -465,16 +465,37 @@ Bosch measures the pedal torque, so its rider power and calories are **measured,
 not inferred**. That is the whole reason for the connector; the distance and the
 GPS track were already available.
 
-There is no public Bosch API. Flow sits behind the same undocumented endpoints
-the phone app uses (`obc-rider-activity.prod.connected-biking.cloud`), reached
-with the rider's own SingleKey ID account. Two consequences: the field map is
-defensive and provisional — `manage.py bosch-probe` dumps a real payload's keys
-so `ACTIVITY_SPECS` can be corrected against evidence rather than guesswork —
-and the login cannot complete unattended, because the app's OAuth redirect is
-`onebikeapp-ios://`, a scheme no desktop browser follows. `bosch-login` hands
-over an authorize URL and takes back the redirect the browser refused. One-off;
-after that the refresh token carries it, and SingleKey rotates it on every use
-so the poller stores the new blob as it goes.
+There is no public Bosch API, and the obvious route died on first contact. The
+Flow app's own public client, `one-bike-app`, is no longer recognised by
+SingleKey: it answers with "misconfigured application", and it answers a client
+id invented on the spot with *exactly the same thing*. Seven redirect-uri
+spellings all failed identically, so it is the client that is gone, not the
+callback. That is worth recording because the error names neither cause, and the
+only way to tell "withdrawn" from "typo" is that control.
+
+So the route is the **EU Data Act** one: Regulation (EU) 2023/2854 gives the
+rider a right to this data, and `portal.bosch-ebike.com/data-act` issues a
+client that is theirs rather than borrowed — which cannot be withdrawn out from
+under the deployment the way the app's was. `BOSCH_CLIENT_ID`,
+`BOSCH_REDIRECT_URI`, `BOSCH_API_BASE` and `BOSCH_ACTIVITY_PATH` are therefore
+settings, not literals: none of it is documented anywhere readable without an
+account, so the code must be steerable from outside.
+
+That route is also pleasanter, for one structural reason: a registered client
+nominates its own recipient URL, so it can be `http://localhost:4200` — which a
+browser will actually follow. `bosch-login` runs a one-shot local server and
+catches the code itself. The app client's `onebikeapp-ios://` could not be
+followed by any desktop browser, which is why that path needed a redirect fished
+out of devtools by hand; it survives as a fallback and says so.
+
+`bosch-login` checks whether the client is recognised *before* sending anyone to
+a browser. Cheap checks before expensive ones — the lesson `garmin-login` learnt
+by discovering an unreadable key after spending an MFA code.
+
+The field map stays defensive and provisional: `manage.py bosch-probe` dumps a
+real payload's keys so `ACTIVITY_SPECS` can be corrected against evidence, and
+`--path` issues a raw request so the ride endpoint can be found from the
+portal's documentation rather than guessed at.
 
 The only existing Python client is GPLv3 and this repo is MIT, so depending on
 it would have taken the whole work with it. The client here is ours and needs no

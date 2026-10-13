@@ -53,8 +53,18 @@ CLIENT_ID = os.environ.get("BOSCH_CLIENT_ID") or "one-bike-app"
 REDIRECT_URI = os.environ.get("BOSCH_REDIRECT_URI") or "onebikeapp-ios://"
 SCOPES = "openid profile email offline_access"
 
-ACTIVITY_HOST = "https://obc-rider-activity.prod.connected-biking.cloud"
-PROFILE_HOST = "https://obc-rider-profile.prod.connected-biking.cloud"
+# Two different backends depending on which client you hold. The app's own
+# endpoints went with its client id; the Data Act host is what a client
+# registered at portal.bosch-ebike.com/data-act talks to. Overridable because
+# neither is documented anywhere we can read without an account.
+APP_ACTIVITY_HOST = "https://obc-rider-activity.prod.connected-biking.cloud"
+DATA_ACT_HOST = "https://api.bosch-ebike.com"
+API_BASE = (os.environ.get("BOSCH_API_BASE")
+            or (DATA_ACT_HOST if os.environ.get("BOSCH_CLIENT_ID")
+                else APP_ACTIVITY_HOST))
+# The path rides are served at. A guess until the portal's own documentation
+# says otherwise, which is why it is a setting rather than a literal.
+ACTIVITY_PATH = os.environ.get("BOSCH_ACTIVITY_PATH") or "/activities"
 
 # Refresh this long before the access token actually expires, so a slow request
 # cannot start valid and finish rejected.
@@ -127,6 +137,69 @@ def check_client(url: str) -> None:
             "(the EU Data Act gives you a right to this data, and the client is "
             "yours rather than borrowed), then set BOSCH_CLIENT_ID\n"
             "  * read the rides from Strava, which Flow syncs to officially")
+
+
+def uses_local_callback() -> bool:
+    """Whether the browser can follow the redirect itself."""
+    return REDIRECT_URI.startswith("http://localhost") or \
+        REDIRECT_URI.startswith("http://127.0.0.1")
+
+
+def listen_for_code(timeout: float = 300.0) -> str:
+    """
+    Catch the authorization code on a local callback, and hand the browser
+    something civil to show for it.
+
+    Only possible because a client registered at the Data Act portal nominates
+    its own recipient URL, so it can be http://localhost -- which a browser will
+    actually follow, unlike the app's onebikeapp-ios:// scheme. This is the
+    whole reason that route is pleasanter: no devtools, no copy-paste.
+    """
+    import http.server
+    import urllib.parse as up
+
+    parsed = up.urlparse(REDIRECT_URI)
+    port = parsed.port or 4200
+    caught: dict = {}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):                                  # noqa: N802
+            params = up.parse_qs(up.urlparse(self.path).query)
+            got = "code" in params or "error" in params
+            if got:
+                caught.update({k: v[0] for k, v in params.items()})
+            body = ("<h2>Signed in.</h2><p>You can close this tab and go back "
+                    "to the terminal.</p>" if "code" in params
+                    else f"<h2>Sign-in failed.</h2><p>{caught.get('error','')}</p>"
+                    if "error" in params else "<p>Waiting&hellip;</p>")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(f"<!doctype html><meta charset=utf-8>{body}".encode())
+
+        def log_message(self, *a):       # the terminal is showing instructions
+            pass
+
+    try:
+        server = http.server.HTTPServer(("127.0.0.1", port), Handler)
+    except OSError as exc:
+        raise BoschError(
+            f"could not listen on 127.0.0.1:{port} ({exc}). The redirect URI "
+            f"registered with Bosch is {REDIRECT_URI}, so that port has to be "
+            "free here -- and this has to run where your browser is, not inside "
+            "the container") from exc
+
+    server.timeout = timeout
+    deadline = __import__("time").monotonic() + timeout
+    with server:
+        while not caught and __import__("time").monotonic() < deadline:
+            server.handle_request()       # favicon and friends come through too
+    if "error" in caught:
+        raise BoschError(f"sign-in was refused: {caught['error']} "
+                         f"{caught.get('error_description', '')}".strip())
+    if "code" not in caught:
+        raise BoschError(f"no callback arrived within {int(timeout)}s")
+    return caught["code"]
 
 
 def code_from_redirect(redirect: str) -> str:
@@ -389,7 +462,7 @@ def fetch_activities(session: Session, start: date_cls, end: date_cls,
     exception, since the caller needs to back off rather than carry on.
     """
     try:
-        payload = session.get(f"{ACTIVITY_HOST}/activities",
+        payload = session.get(f"{API_BASE}{ACTIVITY_PATH}",
                               **{"from": start.isoformat(), "to": end.isoformat()})
     except RateLimited:
         raise
