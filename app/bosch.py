@@ -28,6 +28,7 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import secrets
 import urllib.parse
 from datetime import date as date_cls
@@ -44,8 +45,12 @@ log = logging.getLogger("diet.bosch")
 ISSUER = "https://singlekey-id.com/auth"
 AUTHORIZE_URL = f"{ISSUER}/connect/authorize"
 TOKEN_URL = f"{ISSUER}/connect/token"
-CLIENT_ID = "one-bike-app"          # the app's public client; no secret exists
-REDIRECT_URI = "onebikeapp-ios://"
+# The Flow app's own public client. SingleKey no longer recognises it -- it
+# answers with the same "misconfigured application" it gives an invented id --
+# so both are overridable, which is what a client registered at
+# portal.bosch-ebike.com/data-act needs.
+CLIENT_ID = os.environ.get("BOSCH_CLIENT_ID") or "one-bike-app"
+REDIRECT_URI = os.environ.get("BOSCH_REDIRECT_URI") or "onebikeapp-ios://"
 SCOPES = "openid profile email offline_access"
 
 ACTIVITY_HOST = "https://obc-rider-activity.prod.connected-biking.cloud"
@@ -91,6 +96,37 @@ def start_login() -> tuple[str, str]:
         "state": secrets.token_urlsafe(16),
     })
     return f"{AUTHORIZE_URL}?{query}", verifier
+
+
+def check_client(url: str) -> None:
+    """
+    Ask the identity provider whether it will entertain this client at all.
+
+    SingleKey answers an unknown client_id by redirecting to
+    /errors/misconfigured-application -- and it answers an invented client id
+    exactly the same way, which is how `one-bike-app` was found to be no longer
+    recognised. Checking first costs one unauthenticated request and saves
+    someone signing in and then hunting a devtools pane for a redirect that was
+    never going to come.
+    """
+    import httpx2 as httpx
+    try:
+        reply = httpx.get(url, follow_redirects=False, timeout=20)
+    except Exception as exc:
+        log.warning("bosch: could not pre-check the client: %s", exc)
+        return                      # a network blip is not a verdict
+    location = reply.headers.get("location", "")
+    if "misconfigured-application" in location:
+        raise NeedsLogin(
+            f"SingleKey does not recognise the client id {CLIENT_ID!r}.\n\n"
+            "This is the undocumented client the Flow app itself uses, and it "
+            "answers an invented client id with this same error -- so it has "
+            "been changed or withdrawn, and no amount of retrying will help.\n\n"
+            "Two routes that do not depend on it:\n"
+            "  * register your own client at portal.bosch-ebike.com/data-act "
+            "(the EU Data Act gives you a right to this data, and the client is "
+            "yours rather than borrowed), then set BOSCH_CLIENT_ID\n"
+            "  * read the rides from Strava, which Flow syncs to officially")
 
 
 def code_from_redirect(redirect: str) -> str:

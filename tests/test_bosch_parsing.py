@@ -197,3 +197,62 @@ class TestSharedParser:
         kept = strip_location({"kcal": 1, "startLatitude": 2, "geoJson": 3,
                                "trackPolyline": 4, "endLongitude": 5})
         assert kept == {"kcal": 1}
+
+
+class TestClientPreflight:
+    """SingleKey answers an unknown client id and an invented one identically,
+    so the only way to tell a withdrawn client from a typo is to notice the
+    error at all -- before sending someone to sign in."""
+
+    def test_a_misconfigured_application_redirect_is_fatal(self, monkeypatch):
+        class Reply:
+            status_code = 302
+            headers = {"location": "https://singlekey-id.com/auth/errors/"
+                                   "misconfigured-application?errorId=xyz"}
+        import httpx2
+        monkeypatch.setattr(httpx2, "get", lambda *a, **k: Reply())
+        with pytest.raises(bosch.NeedsLogin, match="does not recognise"):
+            bosch.check_client("https://singlekey-id.com/auth/connect/authorize?x=1")
+
+    def test_the_message_names_the_routes_that_do_not_depend_on_it(self, monkeypatch):
+        class Reply:
+            status_code = 302
+            headers = {"location": "/errors/misconfigured-application?errorId=x"}
+        import httpx2
+        monkeypatch.setattr(httpx2, "get", lambda *a, **k: Reply())
+        with pytest.raises(bosch.NeedsLogin) as caught:
+            bosch.check_client("https://x/")
+        assert "data-act" in str(caught.value) and "Strava" in str(caught.value)
+
+    def test_a_working_client_passes_quietly(self, monkeypatch):
+        class Reply:
+            status_code = 200
+            headers = {}
+        import httpx2
+        monkeypatch.setattr(httpx2, "get", lambda *a, **k: Reply())
+        bosch.check_client("https://x/")
+
+    def test_a_network_blip_is_not_a_verdict(self, monkeypatch):
+        """Refusing to start because the check itself could not run would turn
+        a flaky connection into a diagnosis."""
+        import httpx2
+        def boom(*a, **k):
+            raise RuntimeError("connection reset")
+        monkeypatch.setattr(httpx2, "get", boom)
+        bosch.check_client("https://x/")
+
+    def test_the_client_id_can_be_overridden(self, monkeypatch):
+        """A client registered at Bosch's Data Act portal is the rider's own,
+        so it has to be settable without editing the source."""
+        monkeypatch.setenv("BOSCH_CLIENT_ID", "my-own-client")
+        monkeypatch.setenv("BOSCH_REDIRECT_URI", "http://localhost:4200")
+        import importlib
+        reloaded = importlib.reload(bosch)
+        try:
+            url, _ = reloaded.start_login()
+            assert "client_id=my-own-client" in url
+            assert "localhost%3A4200" in url
+        finally:
+            monkeypatch.delenv("BOSCH_CLIENT_ID")
+            monkeypatch.delenv("BOSCH_REDIRECT_URI")
+            importlib.reload(bosch)

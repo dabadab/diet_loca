@@ -349,6 +349,14 @@ def cmd_bosch_login(args) -> None:
         sys.exit(f"no such user: {args.email}")
 
     url, verifier = bosch.start_login()
+
+    # Before sending anyone to a browser, ask whether the client is recognised
+    # at all. Cheap checks before expensive ones, as garmin-login learned.
+    try:
+        bosch.check_client(url)
+    except bosch.NeedsLogin as exc:
+        sys.exit(f"{exc}")
+
     # A browser never makes a *network request* to onebikeapp-ios:// -- it hands
     # the URL to the operating system -- so there is no such row in the network
     # panel to go looking for. What is there is the ordinary HTTP 302 that tries
