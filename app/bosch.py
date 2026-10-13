@@ -105,17 +105,26 @@ def code_from_redirect(redirect: str) -> str:
     text = (redirect or "").strip().strip('"').strip("'")
     if not text:
         raise BoschError("nothing pasted")
+
     query = urllib.parse.urlparse(text).query or text.partition("?")[2]
     params = urllib.parse.parse_qs(query)
     if "error" in params:
-        raise BoschError(f"sign-in was refused: {params['error'][0]}")
+        detail = params.get("error_description", [""])[0]
+        raise BoschError(f"sign-in was refused: {params['error'][0]} {detail}".strip())
     code = params.get("code", [None])[0]
-    if not code:
-        raise BoschError(
-            "no ?code= in that URL. It should start with onebikeapp-ios:// and "
-            "is the request the browser could not open -- in devtools' network "
-            "pane it is the failed one named oauth2redirect")
-    return code
+    if code:
+        return code
+
+    # A bare code is a perfectly good paste. Digging a whole URL out of a
+    # devtools pane is the fiddly part of this, and someone who managed to read
+    # the code off the screen should not be sent back for the rest of it.
+    if "?" not in text and "/" not in text and len(text) >= 10:
+        return text
+
+    raise BoschError(
+        "no code in that. Expected either the whole onebikeapp-ios:// URL -- "
+        "the 'location:' response header of the last singlekey-id.com 302 in "
+        "devtools' Network tab -- or just the code from it on its own")
 
 
 # --- tokens ----------------------------------------------------------------

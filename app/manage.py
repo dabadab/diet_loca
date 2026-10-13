@@ -349,13 +349,26 @@ def cmd_bosch_login(args) -> None:
         sys.exit(f"no such user: {args.email}")
 
     url, verifier = bosch.start_login()
-    print("\n1. Open this and sign in with your Bosch SingleKey ID:\n")
+    # A browser never makes a *network request* to onebikeapp-ios:// -- it hands
+    # the URL to the operating system -- so there is no such row in the network
+    # panel to go looking for. What is there is the ordinary HTTP 302 that tries
+    # to send the browser there, and the URL sits in its Location header.
+    print("\n1. Open devtools FIRST (F12), go to the Network tab, and tick")
+    print("   'Preserve log'. Without it the entries vanish at the last step.\n")
+    print("2. Open this and sign in with your Bosch SingleKey ID:\n")
     print(f"   {url}\n")
-    print("2. The last step will fail to open an app -- that is expected.")
-    print("   In the browser's devtools, Network tab, find the request to")
-    print("   onebikeapp-ios:// (it shows as failed or blocked) and copy its")
-    print("   full URL.\n")
-    redirect = input("3. Paste that URL here: ").strip()
+    print("3. At the end the browser will refuse to open an app, or show an")
+    print("   'open in app?' dialog, or just appear to stall. All expected.\n")
+    print("4. In the Network tab, scroll to the BOTTOM and find the last")
+    print("   singlekey-id.com request with status 302. Click it, open the")
+    print("   Headers tab, and under Response Headers copy the whole value of")
+    print("   'location:' -- it starts onebikeapp-ios://\n")
+    print("   There is no onebikeapp-ios:// row of its own; a custom scheme is")
+    print("   handed to the OS, not fetched, so only the 302 that points at it")
+    print("   shows up here.\n")
+    print("   If you can see the code but not the whole URL, just paste the")
+    print("   code on its own -- that is all this needs.\n")
+    redirect = input("5. Paste it here: ").strip()
 
     try:
         code = bosch.code_from_redirect(redirect)

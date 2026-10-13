@@ -137,9 +137,22 @@ class TestLogin:
         assert bosch.code_from_redirect(
             '  "onebikeapp-ios://cb?code=abc123"  ') == "abc123"
 
+    def test_a_bare_code_is_accepted(self):
+        """Digging the whole URL out of a devtools pane is the fiddly part.
+        Someone who can read the code off the screen should not be sent back
+        for the rest of it."""
+        assert bosch.code_from_redirect("A1b2C3d4E5f6G7h8") == "A1b2C3d4E5f6G7h8"
+
+    def test_a_refusal_carries_its_description(self):
+        with pytest.raises(bosch.BoschError, match="user cancelled"):
+            bosch.code_from_redirect(
+                "onebikeapp-ios://cb?error=access_denied"
+                "&error_description=user+cancelled")
+
     @pytest.mark.parametrize("pasted, because", [
         ("", "nothing pasted"),
         ("https://singlekey-id.com/auth/login", "the wrong URL entirely"),
+        ("short", "too short to be a code"),
         ("onebikeapp-ios://cb?error=access_denied", "the sign-in was refused"),
     ])
     def test_a_bad_paste_says_what_was_wrong(self, pasted, because):
