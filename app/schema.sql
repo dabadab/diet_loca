@@ -78,6 +78,14 @@ DO $dom$ BEGIN
   END IF;
 END $dom$;
 
+-- The block above only fires when the domain is absent, so an existing database
+-- never sees a changed list -- idempotent is not the same as evolvable. The
+-- constraint is therefore replaced outright every run, which is both idempotent
+-- and evolvable: adding a writer means editing one line here and nothing else.
+ALTER DOMAIN diet.provenance DROP CONSTRAINT IF EXISTS provenance_check;
+ALTER DOMAIN diet.provenance ADD CONSTRAINT provenance_check
+  CHECK (VALUE IN ('garmin', 'bosch', 'claude-estimate', 'manual'));
+
 -- ----------------------------------------------------------- auth.users ---
 
 CREATE TABLE IF NOT EXISTS auth.users (
@@ -453,6 +461,17 @@ CREATE TABLE IF NOT EXISTS diet.activities (
     CHECK (training_effect_aerobic IS NULL OR training_effect_aerobic BETWEEN 0 AND 5),
   training_effect_anaerobic numeric(3,1)
     CHECK (training_effect_anaerobic IS NULL OR training_effect_anaerobic BETWEEN 0 AND 5),
+  -- Measured, not inferred, and only Bosch supplies them: the motor reports
+  -- the rider's own pedal torque. On an ebike that is a better account of the
+  -- effort than a watch's heart-rate estimate, which cannot tell how much of
+  -- the work the motor did.
+  -- Constrained below rather than inline, so that the checks reach a database
+  -- that already had this table too.
+  avg_cadence_rpm    numeric(4,0),
+  avg_rider_power_w  numeric(5,0),
+  -- 0-1. NULL means unknown, which is not the same as zero: "the motor did
+  -- nothing" is a claim, and on an ebike it is the interesting one.
+  motor_energy_share numeric(4,3),
   -- Seconds per heart-rate zone, straight out of the activity list item's
   -- hrTimeInZone_1..5. There is a per-activity endpoint for this too; using it
   -- cost a request per workout for figures Garmin had already sent.
@@ -477,6 +496,32 @@ CREATE INDEX IF NOT EXISTS activities_lookup_idx
 -- breakdown inline, so the request, the bookkeeping and the index are all gone.
 -- Dropped rather than left in place: a column nothing writes is a question
 -- every future reader has to answer.
+-- The Bosch columns, added to a table that may predate them. ADD COLUMN alone
+-- would leave a migrated database without the sanity checks a fresh one gets --
+-- the columns would exist and accept anything -- so the constraints are named
+-- and replaced outright, which is both idempotent and evolvable.
+ALTER TABLE diet.activities
+  ADD COLUMN IF NOT EXISTS avg_cadence_rpm numeric(4,0),
+  ADD COLUMN IF NOT EXISTS avg_rider_power_w numeric(5,0),
+  ADD COLUMN IF NOT EXISTS motor_energy_share numeric(4,3);
+
+DO $acts$
+DECLARE c record;
+BEGIN
+  FOR c IN SELECT * FROM (VALUES
+      ('activities_cadence_sane',
+       'avg_cadence_rpm IS NULL OR avg_cadence_rpm BETWEEN 0 AND 250'),
+      ('activities_rider_power_sane',
+       'avg_rider_power_w IS NULL OR avg_rider_power_w BETWEEN 0 AND 2000'),
+      ('activities_motor_share_sane',
+       'motor_energy_share IS NULL OR motor_energy_share BETWEEN 0 AND 1')
+    ) AS t(name, expr) LOOP
+    EXECUTE format('ALTER TABLE diet.activities DROP CONSTRAINT IF EXISTS %I', c.name);
+    EXECUTE format('ALTER TABLE diet.activities ADD CONSTRAINT %I CHECK (%s)',
+                   c.name, c.expr);
+  END LOOP;
+END $acts$;
+
 DROP INDEX IF EXISTS diet.activities_zone_backlog_idx;
 ALTER TABLE diet.activities DROP COLUMN IF EXISTS zones_fetched_at;
 ALTER TABLE diet.activities DROP COLUMN IF EXISTS zone_attempts;
@@ -552,16 +597,34 @@ CREATE INDEX IF NOT EXISTS meal_items_user_idx ON diet.meal_items (user_id);
 -- run look failed, and the UI can show whose sync is stale.
 CREATE TABLE IF NOT EXISTS diet.sync_state (
   user_id         uuid NOT NULL REFERENCES auth.users(user_id) ON DELETE CASCADE,
-  connector       text NOT NULL CHECK (connector IN ('garmin', 'claude-mcp')),
+  -- Constrained below rather than inline, so the list reaches a database that
+  -- already had this table. Adding a connector is one line there.
+  connector       text NOT NULL,
   last_attempt_at timestamptz,
   last_success_at timestamptz,
   last_error      text,
   PRIMARY KEY (user_id, connector)
 );
 
+ALTER TABLE diet.sync_state DROP CONSTRAINT IF EXISTS sync_state_connector_check;
+ALTER TABLE diet.sync_state ADD CONSTRAINT sync_state_connector_check
+  CHECK (connector IN ('garmin', 'bosch', 'claude-mcp'));
+
 -- Ciphertext only. The key lives outside the database, so a dump of this
 -- table is not a set of Garmin logins.
 CREATE TABLE IF NOT EXISTS diet.garmin_credentials (
+  user_id           uuid PRIMARY KEY REFERENCES auth.users(user_id) ON DELETE CASCADE,
+  secret_ciphertext bytea NOT NULL,
+  key_id            text NOT NULL,
+  updated_at        timestamptz NOT NULL DEFAULT now()
+);
+
+-- The same shape for Bosch: an OAuth token blob rather than a session, but it
+-- is the same secret in the same danger, so it gets the same treatment --
+-- encrypted with a key held outside the database, and unreadable by diet_ro.
+-- One generic connector_credentials table would be the tidier end state; it
+-- would also mean migrating a live credential for no visible gain.
+CREATE TABLE IF NOT EXISTS diet.bosch_credentials (
   user_id           uuid PRIMARY KEY REFERENCES auth.users(user_id) ON DELETE CASCADE,
   secret_ciphertext bytea NOT NULL,
   key_id            text NOT NULL,
@@ -621,8 +684,8 @@ DO $rls$
 DECLARE t text;
 BEGIN
   FOREACH t IN ARRAY ARRAY['measurements', 'activities', 'meals', 'meal_items',
-                           'sync_state', 'garmin_credentials', 'targets',
-                           'ignored_days'] LOOP
+                           'sync_state', 'garmin_credentials', 'bosch_credentials',
+                           'targets', 'ignored_days'] LOOP
     EXECUTE format('ALTER TABLE diet.%I ENABLE ROW LEVEL SECURITY', t);
     -- FORCE so the table owner is bound by the policy too.
     EXECUTE format('ALTER TABLE diet.%I FORCE ROW LEVEL SECURITY', t);
@@ -648,7 +711,7 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA diet TO diet_app;
 GRANT SELECT ON diet.meals, diet.meal_items, diet.measurements, diet.activities,
                 diet.sync_state, diet.targets, diet.ignored_days
   TO diet_ro;
-REVOKE ALL ON diet.garmin_credentials FROM diet_ro;
+REVOKE ALL ON diet.garmin_credentials, diet.bosch_credentials FROM diet_ro;
 
 -- The app role gets no table privileges in auth at all: identity is reachable
 -- only through the definer functions. The read-only role cannot even see the

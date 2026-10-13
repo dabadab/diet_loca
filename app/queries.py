@@ -316,20 +316,68 @@ def targets_list(cur) -> list[dict]:
 # Workouts, as context for a day's energy figures. Their calories are already
 # inside the day's active_kcal, so nothing here may be summed into expenditure.
 
-_ACTIVITY_SQL = """
-    SELECT external_id, started_at, local_date, activity_type, name,
-           duration_s, moving_s, distance_m, kcal, avg_hr, max_hr,
-           elevation_gain_m, avg_speed_mps,
-           training_effect_aerobic, training_effect_anaerobic,
-           hr_zones
-    FROM diet.activities
+# One outing can be two rows: a Garmin cycling activity from the watch and a
+# Bosch row from the bike, recorded by different instruments that disagree about
+# the calories. Which of them the day's energy figures already contain is the
+# thing a reader cannot infer, so it is resolved here and returned as a flag.
+#
+# Resolved at read time, deliberately. The two connectors poll on different
+# cadences, so the Garmin twin routinely arrives after the Bosch ride; a match
+# stamped at write time would be wrong forever for every ride Bosch saw first.
+# A lateral join has no stored state to go stale.
+_TWIN_SQL = """
+    LEFT JOIN LATERAL (
+        SELECT t.source, t.external_id,
+               -- seconds the two actually share
+               EXTRACT(EPOCH FROM (
+                 least(a.started_at + make_interval(secs => a.duration_s),
+                       t.started_at + make_interval(secs => t.duration_s))
+                 - greatest(a.started_at, t.started_at))) AS overlap_s
+        FROM diet.activities t
+        WHERE t.source <> a.source
+          AND a.duration_s IS NOT NULL AND t.duration_s IS NOT NULL
+          AND t.started_at < a.started_at + make_interval(secs => a.duration_s)
+          AND a.started_at < t.started_at + make_interval(secs => t.duration_s)
+          -- Most of the shorter one, not merely a shared minute: a ride that
+          -- ends as a run begins is two activities, not one seen twice.
+          AND EXTRACT(EPOCH FROM (
+                least(a.started_at + make_interval(secs => a.duration_s),
+                      t.started_at + make_interval(secs => t.duration_s))
+                - greatest(a.started_at, t.started_at)))
+              > 0.6 * least(a.duration_s, t.duration_s)
+        ORDER BY overlap_s DESC
+        LIMIT 1
+    ) twin ON true
 """
+
+_ACTIVITY_SQL = """
+    SELECT a.external_id, a.started_at, a.local_date, a.activity_type, a.name,
+           a.duration_s, a.moving_s, a.distance_m, a.kcal, a.avg_hr, a.max_hr,
+           a.elevation_gain_m, a.avg_speed_mps,
+           a.training_effect_aerobic, a.training_effect_anaerobic,
+           a.hr_zones, a.source,
+           a.avg_cadence_rpm, a.avg_rider_power_w, a.motor_energy_share,
+           twin.source      AS matched_source,
+           twin.external_id AS matched_external_id,
+           -- The day's active_kcal comes from the watch's own daily total, so a
+           -- ride the watch recorded is already inside it. A ride it did not is
+           -- in no expenditure figure at all -- which is worth saying out loud
+           -- rather than leaving to be worked out from a NULL.
+           -- coalesced, not bare: with no twin the OR is FALSE OR NULL, which
+           -- is NULL, and a flag whose whole job is to separate "already
+           -- counted" from "counted nowhere" must never answer "neither".
+           (a.source = 'garmin'
+            OR coalesce(twin.source, '') = 'garmin') AS in_expenditure
+    FROM diet.activities a
+""" + _TWIN_SQL
 
 # raw is deliberately not projected: it is an archive for re-deriving a field
 # that was never promoted to a column, not something to push through a response.
 _ACTIVITY_NUMERIC = ("duration_s", "moving_s", "distance_m", "kcal", "avg_hr",
                      "max_hr", "elevation_gain_m", "avg_speed_mps",
-                     "training_effect_aerobic", "training_effect_anaerobic")
+                     "training_effect_aerobic", "training_effect_anaerobic",
+                     "avg_cadence_rpm", "avg_rider_power_w",
+                     "motor_energy_share")
 
 
 def _activity_row(r) -> dict:
@@ -344,7 +392,7 @@ def _activity_row(r) -> dict:
 
 def activities_on(cur, local_date) -> list[dict]:
     """One day's workouts, in the order they happened."""
-    cur.execute(_ACTIVITY_SQL + " WHERE local_date = %(d)s ORDER BY started_at",
+    cur.execute(_ACTIVITY_SQL + " WHERE a.local_date = %(d)s ORDER BY a.started_at",
                 {"d": local_date})
     return [_activity_row(r) for r in cur.fetchall()]
 
@@ -353,9 +401,9 @@ def activities_range(cur, from_date, to_date, activity_type=None) -> list[dict]:
     """Workouts over a date range, newest first, optionally one type only."""
     cur.execute(
         _ACTIVITY_SQL + """
-         WHERE local_date BETWEEN %(a)s AND %(b)s
-           AND (%(t)s::text IS NULL OR activity_type = %(t)s)
-         ORDER BY started_at DESC""",
+         WHERE a.local_date BETWEEN %(a)s AND %(b)s
+           AND (%(t)s::text IS NULL OR a.activity_type = %(t)s)
+         ORDER BY a.started_at DESC""",
         {"a": from_date, "b": to_date, "t": activity_type})
     return [_activity_row(r) for r in cur.fetchall()]
 

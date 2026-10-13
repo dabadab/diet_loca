@@ -455,6 +455,79 @@ pointed at Postgres later for the user's own ad-hoc charts if wanted — that's
 free given the existing Grafana/VictoriaMetrics setup — but it's not the
 primary UI.
 
+## Bosch Flow ebike rides
+
+A second connector, because for an ebike Garmin is the wrong instrument twice
+over: when the watch is not worn the ride is invisible, and when it is, its
+calorie figure comes from heart rate — which overstates an assisted ride,
+because the motor is doing part of the work and the heart rate does not know it.
+Bosch measures the pedal torque, so its rider power and calories are **measured,
+not inferred**. That is the whole reason for the connector; the distance and the
+GPS track were already available.
+
+There is no public Bosch API. Flow sits behind the same undocumented endpoints
+the phone app uses (`obc-rider-activity.prod.connected-biking.cloud`), reached
+with the rider's own SingleKey ID account. Two consequences: the field map is
+defensive and provisional — `manage.py bosch-probe` dumps a real payload's keys
+so `ACTIVITY_SPECS` can be corrected against evidence rather than guesswork —
+and the login cannot complete unattended, because the app's OAuth redirect is
+`onebikeapp-ios://`, a scheme no desktop browser follows. `bosch-login` hands
+over an authorize URL and takes back the redirect the browser refused. One-off;
+after that the refresh token carries it, and SingleKey rotates it on every use
+so the poller stores the new blob as it goes.
+
+The only existing Python client is GPLv3 and this repo is MIT, so depending on
+it would have taken the whole work with it. The client here is ours and needs no
+new dependency: this is OIDC and JSON.
+
+### One outing, two rows
+
+A ride recorded by both appears twice, with two calorie figures that will not
+agree. Which of them the day's energy already contains is the thing a reader
+cannot work out from the rows, so it is resolved and reported as
+`in_expenditure`:
+
+- `true` — the watch recorded it, so the day's `active_kcal` already covers it.
+- `false` — only the bike saw it, so **no expenditure figure contains that
+  effort at all**.
+
+Matching is **resolved at read time, never stamped at write time**. The two
+connectors poll on different cadences, so the Garmin twin routinely arrives
+after the Bosch ride; a match written once would be wrong forever for every ride
+Bosch saw first. A lateral join has no stored state to go stale, and a test
+covers exactly that ordering.
+
+Two details that look fussy and are not. The overlap must exceed **60% of the
+shorter ride**, not merely be non-zero — a ride that ends as a run begins shares
+several minutes and is two activities, not one seen twice. And the flag is
+`coalesce`d, because `a.source = 'garmin' OR twin.source = 'garmin'` is
+`FALSE OR NULL` for an unmatched Bosch ride, and a flag whose entire job is to
+separate two cases must never answer "neither".
+
+### What it deliberately does not do
+
+It does not let a Bosch ride change the energy view. `_DAYS_SQL` not referencing
+`diet.activities` is the invariant that stops activity calories being
+double-counted into expenditure, and it still holds with Bosch rows present —
+`test_the_energy_view_still_ignores_activities_entirely` asserts it. An
+unmatched ride is therefore *surfaced, not counted*: the data says plainly that
+nothing covers it, and turning that into a contribution is its own decision
+rather than a side effect of an ingest feature.
+
+### Evolving the schema, twice learned
+
+Adding a connector needed two constraint lists to change, and both were written
+in a form that only reaches a *new* database: `diet.provenance`'s CHECK lives
+inside a `DO` block guarded on the domain's absence, and `sync_state.connector`'s
+was inline in `CREATE TABLE`. Both are now named constraints dropped and
+re-added every run — idempotent *and* evolvable.
+
+The same trap caught the new columns: `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
+carries no CHECK, so a migrated database accepted a motor share of 1.5 that a
+fresh one refused. The constraints are named and replaced in their own loop, and
+`TestMigratingAnOlderDatabase` simulates an older database rather than trusting
+a fresh one to prove anything about the upgrade path.
+
 ## The weight chart
 
 On the Summary tab, over the same window as everything else there: since the

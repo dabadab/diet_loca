@@ -233,3 +233,153 @@ class TestSyncState:
         poller._record(user, ok=False, error="session expired")
         with pool.user_tx(other_user) as cur:
             assert queries.sync_snapshot(cur)["connectors"] == {}
+
+
+# ----------------------------------------------------------------- bosch ---
+
+BOSCH_RIDE = {
+    "activityId": "ride-1", "name": "Commute",
+    "startTime": "2026-10-12T07:30:00Z", "duration": 2400, "distance": 18500,
+    "calories": 310, "averageRiderPower": 112, "averageCadence": 68,
+    "riderEnergy": 1300, "motorEnergy": 2600,
+}
+
+
+class FakeSession:
+    """Stands in for a logged-in Bosch rider, and counts what was asked for."""
+
+    def __init__(self, rides=(BOSCH_RIDE,), fail=None, refreshed=False):
+        self.rides, self.fail, self.refreshed = list(rides), fail, refreshed
+        self.calls = []
+        self.tokens = {"access_token": "a", "refresh_token": "r"}
+
+    def get(self, url, **params):
+        self.calls.append((url, params))
+        if self.fail:
+            raise self.fail
+        return {"activities": self.rides}
+
+
+@pytest.fixture
+def bosch_account(user, owner, pool):
+    owner.execute(
+        """INSERT INTO diet.bosch_credentials (user_id, secret_ciphertext, key_id)
+           VALUES (%s, %s, 'k')""", (user, b"ciphertext"))
+    return {"user_id": user, "email": "a@example.com",
+            "timezone": "Europe/Budapest", "secret_ciphertext": b"ciphertext",
+            "key_id": "k"}
+
+
+@pytest.fixture
+def fake_bosch(monkeypatch):
+    from app import bosch, secretbox
+    monkeypatch.setattr(secretbox, "decrypt", lambda ct, kid: "{}")
+
+    def install(session):
+        monkeypatch.setattr(bosch, "resume", lambda token: session)
+        return session
+    return install
+
+
+class TestBoschRides:
+    def test_a_window_of_rides_is_stored(self, bosch_account, fake_bosch, pool):
+        from app import bosch
+        api = fake_bosch(FakeSession())
+        stored, rejected = poller.poll_bosch(bosch_account, 7, None)
+        assert (stored, rejected) == (1, [])
+        with pool.user_tx(bosch_account["user_id"]) as cur:
+            row = cur.execute(
+                "SELECT source, activity_type, kcal, avg_rider_power_w, "
+                "motor_energy_share FROM diet.activities").fetchone()
+        assert row["source"] == "bosch" and row["activity_type"] == "ebike_ride"
+        assert float(row["kcal"]) == 310.0
+        assert float(row["avg_rider_power_w"]) == 112.0
+        assert float(row["motor_energy_share"]) == pytest.approx(2600 / 3900, abs=1e-3)
+
+    def test_the_window_is_asked_for_once(self, bosch_account, fake_bosch):
+        api = fake_bosch(FakeSession())
+        poller.poll_bosch(bosch_account, 7, None)
+        assert len(api.calls) == 1, "one request for the whole window"
+        _, params = api.calls[0]
+        today = dt.datetime.now(ZoneInfo(bosch_account["timezone"])).date()
+        assert params["from"] == (today - dt.timedelta(days=6)).isoformat()
+        assert params["to"] == today.isoformat()
+
+    def test_a_re_fetched_ride_updates_rather_than_duplicates(
+            self, bosch_account, fake_bosch, pool):
+        fake_bosch(FakeSession())
+        poller.poll_bosch(bosch_account, 7, None)
+        fake_bosch(FakeSession([dict(BOSCH_RIDE, calories=333)]))
+        poller.poll_bosch(bosch_account, 7, None)
+        with pool.user_tx(bosch_account["user_id"]) as cur:
+            got = cur.execute("SELECT kcal FROM diet.activities").fetchall()
+        assert len(got) == 1 and float(got[0]["kcal"]) == 333.0
+
+    def test_rotated_tokens_are_persisted(self, bosch_account, fake_bosch, pool,
+                                          monkeypatch):
+        """SingleKey rotates the refresh token on use. Not storing the new one
+        works until it does not, and then needs a human at a browser."""
+        from app import bosch, secretbox
+        monkeypatch.setattr(secretbox, "encrypt", lambda s: (b"new-ct", "k2"))
+        session = fake_bosch(FakeSession(refreshed=True))
+        session.tokens = {"access_token": "fresh", "refresh_token": "rotated"}
+        poller.poll_bosch(bosch_account, 7, None)
+        with pool.user_tx(bosch_account["user_id"]) as cur:
+            row = cur.execute("SELECT secret_ciphertext, key_id "
+                              "FROM diet.bosch_credentials").fetchone()
+        assert bytes(row["secret_ciphertext"]) == b"new-ct" and row["key_id"] == "k2"
+
+    def test_tokens_are_left_alone_when_nothing_was_refreshed(
+            self, bosch_account, fake_bosch, pool):
+        fake_bosch(FakeSession(refreshed=False))
+        poller.poll_bosch(bosch_account, 7, None)
+        with pool.user_tx(bosch_account["user_id"]) as cur:
+            row = cur.execute("SELECT secret_ciphertext "
+                              "FROM diet.bosch_credentials").fetchone()
+        assert bytes(row["secret_ciphertext"]) == b"ciphertext"
+
+    def test_a_rate_limit_is_raised_as_such(self, bosch_account, fake_bosch):
+        from app import bosch
+        fake_bosch(FakeSession(fail=bosch.RateLimited("429")))
+        with pytest.raises(poller.RateLimited):
+            poller.poll_bosch(bosch_account, 7, None)
+
+    def test_an_expired_session_is_distinguishable_from_a_blip(
+            self, bosch_account, fake_bosch):
+        """Only a person at a browser can fix it, so the poller must be able to
+        say that rather than retrying forever."""
+        from app import bosch
+        fake_bosch(FakeSession(fail=bosch.NeedsLogin("refresh token spent")))
+        with pytest.raises(bosch.NeedsLogin):
+            poller.poll_bosch(bosch_account, 7, None)
+
+    def test_an_ordinary_failure_costs_no_rides(self, bosch_account, fake_bosch):
+        """Bosch being unreachable returns nothing rather than propagating, so
+        it cannot take the Garmin half of the pass down with it."""
+        fake_bosch(FakeSession(fail=RuntimeError("connection reset")))
+        assert poller.poll_bosch(bosch_account, 7, None) == (0, [])
+
+    def test_raw_payloads_are_archived(self, bosch_account, fake_bosch, tmp_path):
+        fake_bosch(FakeSession())
+        poller.poll_bosch(bosch_account, 3, tmp_path)
+        written = list((tmp_path / bosch_account["email"]).glob("bosch-*.json"))
+        assert len(written) == 1
+        assert "startLatitude" not in written[0].read_text()
+
+
+class TestConnectorsAreIndependent:
+    def test_each_connector_claims_separately(self, pool, user):
+        """One claim must not block the other, or whichever polled first would
+        silently starve the other every cycle."""
+        assert poller.claim(user, connector="garmin") is True
+        assert poller.claim(user, connector="bosch") is True
+        assert poller.claim(user, connector="bosch") is False
+
+    def test_failures_are_recorded_against_the_right_connector(self, pool, user):
+        poller._record(user, ok=True, error=None, connector="garmin")
+        poller._record(user, ok=False, error="session expired", connector="bosch")
+        with pool.user_tx(user) as cur:
+            state = queries.sync_snapshot(cur)["connectors"]
+        assert state["garmin"]["last_error"] is None
+        assert state["bosch"]["last_error"] == "session expired"
+        assert state["garmin"]["last_success_at"] is not None

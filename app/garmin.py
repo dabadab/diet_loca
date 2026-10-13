@@ -27,7 +27,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
+from .fieldmap import (FieldSpec, describe_payload, dig, parse_utc,
+                       strip_location)
+
 log = logging.getLogger("diet.garmin")
+
+# Re-exported: these were defined here before Bosch arrived and needed them too.
+__all__ = ["describe_payload", "extract", "extract_activity", "fetch_day",
+           "fetch_activities", "is_rate_limited", "looks_empty", "resume"]
 
 
 @dataclass(frozen=True)
@@ -35,18 +42,6 @@ class Reading:
     metric: str
     value: float
     unit: str
-
-
-def _dig(payload: Any, path: str) -> Any:
-    """Dotted lookup that tolerates the key simply not being there."""
-    cur = payload
-    for part in path.split("."):
-        if not isinstance(cur, dict):
-            return None
-        cur = cur.get(part)
-        if cur is None:
-            return None
-    return cur
 
 
 @dataclass(frozen=True)
@@ -60,7 +55,7 @@ class MetricSpec:
 
     def read(self, payload: dict) -> Reading | None:
         for path in self.paths:
-            raw = _dig(payload, path)
+            raw = dig(payload, path)
             if raw is None:
                 continue
             try:
@@ -121,25 +116,6 @@ def looks_empty(daily: dict | None, sleep: dict | None) -> bool:
     """True when Garmin simply has nothing for the day yet."""
     keys = describe_payload(daily or {}) + describe_payload(sleep or {})
     return len(keys) <= EMPTY_DAY_MAX_NUMERIC_KEYS
-
-
-def describe_payload(payload: Any, prefix: str = "", depth: int = 2) -> list[str]:
-    """
-    Flat list of the numeric-looking keys in a payload.
-
-    For when a metric stops arriving: compare this against DAILY_SPECS to see
-    where the field moved, instead of reading a wall of JSON.
-    """
-    found: list[str] = []
-    if depth < 0 or not isinstance(payload, dict):
-        return found
-    for k, v in payload.items():
-        path = f"{prefix}{k}"
-        if isinstance(v, (int, float)) and not isinstance(v, bool):
-            found.append(f"{path}={v}")
-        elif isinstance(v, dict):
-            found.extend(describe_payload(v, f"{path}.", depth - 1))
-    return found
 
 
 # --- session ---------------------------------------------------------------
@@ -207,40 +183,6 @@ def fetch_day(api: Any, day: date_cls, raw_dir: Path | None = None) -> tuple[dic
 # fields. The whole window comes back in one request, so this costs one call
 # per poll however many activities are in it.
 
-# Coordinates ride along in the list item. They are a location trace, they have
-# nothing to do with diet, and the stored `raw` is readable by diet_ro -- the
-# role behind the model-facing query_sql -- so they are dropped on the way in.
-LOCATION_KEYS = frozenset({
-    "startLatitude", "startLongitude", "endLatitude", "endLongitude",
-})
-
-
-def _strip_location(item: dict) -> dict:
-    return {k: v for k, v in item.items()
-            if k not in LOCATION_KEYS and "olyline" not in k}
-
-
-@dataclass(frozen=True)
-class FieldSpec:
-    """MetricSpec's idea applied to a column instead of a reading: several
-    candidate paths, because Garmin has renamed these before."""
-    column: str
-    paths: Sequence[str]
-    convert: Callable[[Any], Any] = float
-
-    def read(self, item: dict) -> Any:
-        for path in self.paths:
-            raw = _dig(item, path)
-            if raw is None:
-                continue
-            try:
-                return self.convert(raw)
-            except (TypeError, ValueError):
-                log.warning("garmin: activity %s at %s was %r, unusable",
-                            self.column, path, raw)
-        return None
-
-
 ACTIVITY_SPECS: tuple[FieldSpec, ...] = (
     FieldSpec("name", ("activityName",), convert=lambda v: str(v)[:300] or None),
     FieldSpec("duration_s", ("duration", "elapsedDuration")),
@@ -277,18 +219,6 @@ def _hr_zones(item: dict) -> list[dict] | None:
     return out or None
 
 
-def _parse_gmt(value: Any) -> datetime | None:
-    """Garmin's 'YYYY-MM-DD HH:MM:SS', which is UTC despite carrying no zone."""
-    if not isinstance(value, str):
-        return None
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
-        try:
-            return datetime.strptime(value.rstrip("Z"), fmt).replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-    return None
-
-
 def extract_activity(item: Any) -> dict | None:
     """
     One list item to one row, or None if it cannot be identified.
@@ -300,8 +230,8 @@ def extract_activity(item: Any) -> dict | None:
     if not isinstance(item, dict):
         return None
     external_id = item.get("activityId")
-    started_at = _parse_gmt(item.get("startTimeGMT"))
-    activity_type = _dig(item, "activityType.typeKey") or item.get("activityTypeKey")
+    started_at = parse_utc(item.get("startTimeGMT"))
+    activity_type = dig(item, "activityType.typeKey") or item.get("activityTypeKey")
     if external_id is None or started_at is None or not activity_type:
         log.warning("garmin: skipping activity with no id/start/type: %s",
                     ", ".join(sorted(item)[:10]) if isinstance(item, dict) else item)
@@ -312,7 +242,7 @@ def extract_activity(item: Any) -> dict | None:
         "started_at": started_at,
         "activity_type": str(activity_type)[:100],
         "hr_zones": _hr_zones(item),
-        "raw": _strip_location(item),
+        "raw": strip_location(item),
     }
     for spec in ACTIVITY_SPECS:
         row[spec.column] = spec.read(item)
@@ -343,7 +273,7 @@ def fetch_activities(api: Any, start: date_cls, end: date_cls,
         try:
             raw_dir.mkdir(parents=True, exist_ok=True)
             (raw_dir / f"activities-{start}_{end}.json").write_text(
-                json.dumps([_strip_location(i) for i in items if isinstance(i, dict)],
+                json.dumps([strip_location(i) for i in items if isinstance(i, dict)],
                            indent=2, default=str))
         except OSError as exc:
             log.warning("garmin: could not write raw activities for %s..%s: %s",

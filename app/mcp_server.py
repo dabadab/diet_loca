@@ -212,6 +212,11 @@ def get_day(date: str | None = None) -> dict:
 
     `ignored` means the day has been deliberately left out of the summaries;
     `ignored_reason` says why. Its figures below are still real.
+
+    Activities carry a `source` and an `in_expenditure` flag — one outing may
+    appear twice, once from the watch and once from the ebike, with different
+    calorie figures. See `get_activities` for what that means before reasoning
+    about either number.
     """
     user_id, tz = _identity()
     with db.user_tx(user_id) as cur:
@@ -253,9 +258,29 @@ def get_activities(from_date: str | None = None, to_date: str | None = None,
     hour from a hard one when the totals look alike. An activity recorded
     without a heart-rate reading has no zones.
 
-    An activity's `kcal` is ALREADY included in that day's `active_kcal`
-    measurement from `get_range`. Use activities to explain what the day's
-    expenditure consisted of — never add them to it.
+    `source` says which instrument recorded it, and this matters:
+
+    - `garmin` — a watch. Its `kcal` is ESTIMATED from heart rate.
+    - `bosch` — the ebike's own motor. Its `kcal` and `avg_rider_power_w` are
+      MEASURED from pedal torque, and it also reports `avg_cadence_rpm` and
+      `motor_energy_share` (0–1, how much of the ride the motor did). It has no
+      heart rate at all; the bike has no such sensor.
+
+    **One ride can appear twice**, once from each. When it does, the two `kcal`
+    figures will not agree, and the Bosch one is the better account of what the
+    rider did: a heart-rate estimate cannot tell how much of the work the motor
+    was doing, so it reads an assisted ride as harder than it was.
+    `matched_source` and `matched_external_id` name the other row when there is
+    one, so you can recognise a pair rather than reporting two rides.
+
+    NEVER add any activity's calories to expenditure. `in_expenditure` says
+    whether the day's `active_kcal` already covers that ride:
+
+    - `true` — the watch recorded it, so it is already in the day's figures.
+    - `false` — nothing recorded it but the bike, so it is in NO expenditure
+      figure. The day's `active_kcal` is missing that effort entirely. Say so if
+      it is relevant; do not silently add it, and do not treat the day's deficit
+      as if it accounted for the ride.
 
     Dates are YYYY-MM-DD in the user's timezone; the default range is the last
     14 days. `activity_type` is the tracker's own key, such as `running`,
@@ -414,7 +439,9 @@ def query_sql(sql: str) -> dict:
     only ever read this user's rows — write the query as if the tables held
     their data alone. Tables: diet.meals, diet.meal_items, diet.measurements,
     diet.activities, diet.sync_state, diet.targets, diet.ignored_days. Single
-    SELECT (or WITH) statement, at most 500 rows returned.
+    SELECT (or WITH) statement, at most 500 rows returned. Note that
+    diet.activities holds one row per instrument, so a ride recorded by both a
+    watch and an ebike is two rows — count outings with care.
     """
     if not db.ro_pool_ready():
         raise ToolError("ad-hoc SQL is not available on this server "

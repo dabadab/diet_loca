@@ -321,6 +321,117 @@ def cmd_garmin_login(args) -> None:
     print("run `python -m app.poller --user " + args.email + "` to pull data now")
 
 
+def cmd_bosch_login(args) -> None:
+    """
+    Authorise Bosch Flow once and store the resulting tokens, encrypted.
+
+    The Flow app's OAuth redirect is `onebikeapp-ios://`, a scheme no desktop
+    browser will follow, so this cannot complete on its own: it hands over an
+    authorize URL and takes back the redirect the browser refused. Clumsy, but
+    one-off -- after this the refresh token carries it, and the rotated tokens
+    are stored by the poller as it goes.
+    """
+    from . import bosch, secretbox
+
+    # Cheap checks before anything expensive, as garmin-login learned: finding
+    # an unreadable key after the human has done the browser dance wastes the
+    # one part of this that cannot be automated.
+    try:
+        secretbox.check_usable()
+    except secretbox.KeyUnavailable as exc:
+        sys.exit(f"{exc}\n\nFix the key first: nothing has been sent to Bosch.")
+
+    with _owner_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT user_id FROM auth.users WHERE email = lower(%s)",
+                    (args.email,))
+        row = cur.fetchone()
+    if row is None:
+        sys.exit(f"no such user: {args.email}")
+
+    url, verifier = bosch.start_login()
+    print("\n1. Open this and sign in with your Bosch SingleKey ID:\n")
+    print(f"   {url}\n")
+    print("2. The last step will fail to open an app -- that is expected.")
+    print("   In the browser's devtools, Network tab, find the request to")
+    print("   onebikeapp-ios:// (it shows as failed or blocked) and copy its")
+    print("   full URL.\n")
+    redirect = input("3. Paste that URL here: ").strip()
+
+    try:
+        code = bosch.code_from_redirect(redirect)
+        tokens = bosch.exchange_code(code, verifier)
+    except bosch.BoschError as exc:
+        sys.exit(f"Bosch login failed: {exc}")
+
+    import json as _json
+    import time as _time
+    tokens["expires_at"] = _time.time() + int(tokens.get("expires_in") or 3600)
+    token_json = _json.dumps(tokens)
+
+    try:
+        ciphertext, key_id = secretbox.encrypt(token_json)
+    except secretbox.KeyUnavailable as exc:
+        print(f"\n{exc}\n", file=sys.stderr)
+        print("The Bosch tokens below are valid. Fix the key and re-run "
+              "bosch-login; nothing was written to disk.\n", file=sys.stderr)
+        print(token_json)
+        sys.exit(1)
+
+    with _owner_conn() as conn, conn.cursor() as cur:
+        cur.execute("""INSERT INTO diet.bosch_credentials
+                         (user_id, secret_ciphertext, key_id)
+                       VALUES (%s, %s, %s)
+                       ON CONFLICT (user_id) DO UPDATE
+                         SET secret_ciphertext = EXCLUDED.secret_ciphertext,
+                             key_id = EXCLUDED.key_id, updated_at = now()""",
+                    (row["user_id"], ciphertext, key_id))
+        conn.commit()
+    print(f"\nstored encrypted Bosch tokens for {args.email}")
+    print(f"next: `python -m app.manage bosch-probe {args.email}` to see what "
+          "the API actually returns")
+
+
+def cmd_bosch_probe(args) -> None:
+    """
+    Dump what a real ride payload contains.
+
+    Bosch publishes no schema, so app/bosch.py's field map is a list of
+    plausible spellings until this has been run once. This is the evidence it
+    gets corrected against -- and the first thing to check when a value that
+    used to arrive stops.
+    """
+    from datetime import date, timedelta
+    from . import bosch, secretbox
+
+    with _owner_conn() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT c.secret_ciphertext, c.key_id
+                       FROM diet.bosch_credentials c JOIN auth.users u USING (user_id)
+                       WHERE u.email = lower(%s)""", (args.email,))
+        row = cur.fetchone()
+    if row is None:
+        sys.exit(f"no stored Bosch tokens for {args.email}; run bosch-login first")
+
+    session = bosch.resume(secretbox.decrypt(row["secret_ciphertext"], row["key_id"]))
+    today = date.today()
+    lines = bosch.probe(session, today - timedelta(days=args.days), today)
+    if not lines:
+        sys.exit(f"no rides returned for the last {args.days} days")
+    print("\n".join(lines))
+    print("\nCompare these against ACTIVITY_SPECS in app/bosch.py: any column "
+          "whose paths match nothing here is arriving as NULL.")
+
+
+def cmd_bosch_forget(args) -> None:
+    with _owner_conn() as conn, conn.cursor() as cur:
+        cur.execute("""DELETE FROM diet.bosch_credentials WHERE user_id =
+                       (SELECT user_id FROM auth.users WHERE email = lower(%s))""",
+                    (args.email,))
+        if cur.rowcount == 0:
+            sys.exit(f"no stored Bosch session for {args.email}")
+        conn.commit()
+    print(f"forgot the Bosch session for {args.email}")
+
+
 def cmd_garmin_forget(args) -> None:
     with _owner_conn() as conn, conn.cursor() as cur:
         cur.execute("""DELETE FROM diet.garmin_credentials WHERE user_id =
@@ -430,6 +541,21 @@ def main() -> None:
     gl.add_argument("--garmin-email", default=None,
                     help="the Garmin account email, if different; prompted otherwise")
     gl.set_defaults(fn=cmd_garmin_login)
+
+    bl = sub.add_parser("bosch-login", help="store encrypted Bosch Flow tokens")
+    bl.add_argument("email")
+    bl.set_defaults(fn=cmd_bosch_login)
+
+    bp = sub.add_parser("bosch-probe",
+                        help="show what a real Bosch ride payload contains")
+    bp.add_argument("email")
+    bp.add_argument("--days", type=int, default=30,
+                    help="how far back to look for a ride (default 30)")
+    bp.set_defaults(fn=cmd_bosch_probe)
+
+    bf = sub.add_parser("bosch-forget", help="delete stored Bosch tokens")
+    bf.add_argument("email")
+    bf.set_defaults(fn=cmd_bosch_forget)
 
     gf = sub.add_parser("garmin-forget", help="delete a stored Garmin session")
     gf.add_argument("email")

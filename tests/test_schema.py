@@ -13,7 +13,8 @@ import pytest
 # Every table holding user data. Adding one to diet without adding it here is
 # exactly the mistake this test exists to catch.
 USER_TABLES = ["measurements", "activities", "meals", "meal_items",
-               "sync_state", "garmin_credentials", "targets", "ignored_days"]
+               "sync_state", "garmin_credentials", "bosch_credentials",
+               "targets", "ignored_days"]
 
 
 def test_migration_is_idempotent(owner_dsn):
@@ -55,6 +56,14 @@ class TestReadOnlyRole:
         with psycopg.connect(dsns["ro"]) as c:
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 c.execute("SELECT 1 FROM auth.users")
+
+    @pytest.mark.parametrize("table", ["garmin_credentials", "bosch_credentials"])
+    def test_cannot_read_any_stored_credential(self, dsns, table):
+        """A credential table is never readable through the model-facing tool,
+        whichever connector it belongs to."""
+        with psycopg.connect(dsns["ro"]) as c:
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                c.execute(f"SELECT 1 FROM diet.{table}")
 
     def test_cannot_read_garmin_credentials(self, dsns):
         """A blanket schema grant once handed these over; the tool's docstring
@@ -168,3 +177,144 @@ class TestLocalDateTrigger:
                VALUES (%s, '2026-09-08 23:30+00', 'garmin', 'steps', 1, 'count', 'e')
                RETURNING local_date""", (uid,)).fetchone()
         assert str(row["local_date"]) == expected
+
+
+class TestProvenance:
+    """The domain is created inside a guard on its own absence, so a changed
+    list would never reach a database that already had it. The constraint is
+    replaced outright every run instead -- idempotent *and* evolvable."""
+
+    @pytest.mark.parametrize("source", ["garmin", "bosch", "claude-estimate",
+                                        "manual"])
+    def test_every_writer_is_accepted(self, owner, user, source):
+        owner.execute(
+            """INSERT INTO diet.activities
+               (user_id, source, external_id, started_at, activity_type)
+               VALUES (%s, %s, %s, now(), 'x')""", (user, source, source))
+
+    def test_an_unknown_writer_is_still_refused(self, owner, user):
+        with pytest.raises(psycopg.errors.CheckViolation):
+            owner.execute(
+                """INSERT INTO diet.activities
+                   (user_id, source, external_id, started_at, activity_type)
+                   VALUES (%s, 'strava', 'x', now(), 'x')""", (user,))
+
+
+class TestBoschColumnsAreConstrained:
+    """These columns are added by ALTER on a database that predates them, and
+    ALTER COLUMN alone carries no CHECK -- a migrated database would accept
+    anything while a fresh one refused it. The constraints are therefore named
+    and replaced, not inline."""
+
+    @pytest.mark.parametrize("column, value", [
+        ("avg_cadence_rpm", 900),
+        ("avg_rider_power_w", 9999),
+        ("motor_energy_share", 1.5),
+        ("motor_energy_share", -0.1),
+    ])
+    def test_an_implausible_value_is_refused(self, owner, user, column, value):
+        with pytest.raises(psycopg.errors.CheckViolation):
+            owner.execute(
+                f"""INSERT INTO diet.activities
+                    (user_id, source, external_id, started_at, activity_type, {column})
+                    VALUES (%s, 'bosch', 'x', now(), 'ebike_ride', %s)""",
+                (user, value))
+
+    def test_plausible_values_are_accepted(self, owner, user):
+        owner.execute(
+            """INSERT INTO diet.activities
+               (user_id, source, external_id, started_at, activity_type,
+                avg_cadence_rpm, avg_rider_power_w, motor_energy_share)
+               VALUES (%s, 'bosch', 'ok', now(), 'ebike_ride', 68, 112, 0.667)""",
+            (user,))
+
+
+class TestMigratingAnOlderDatabase:
+    """
+    Applying the schema to a database that predates a change is the case
+    production actually takes, and the one a fresh-database test cannot see.
+
+    Simulated by removing what the older version lacked rather than by checking
+    out old SQL, so the test keeps working as the schema moves on.
+    """
+
+    def _make_it_old(self, owner):
+        owner.execute("ALTER DOMAIN diet.provenance DROP CONSTRAINT provenance_check")
+        owner.execute("""ALTER DOMAIN diet.provenance ADD CONSTRAINT provenance_check
+                         CHECK (VALUE IN ('garmin', 'claude-estimate', 'manual'))""")
+        for name in ("activities_cadence_sane", "activities_rider_power_sane",
+                     "activities_motor_share_sane"):
+            owner.execute(f"ALTER TABLE diet.activities DROP CONSTRAINT {name}")
+        for col in ("avg_cadence_rpm", "avg_rider_power_w", "motor_energy_share"):
+            owner.execute(f"ALTER TABLE diet.activities DROP COLUMN {col}")
+        owner.execute("DROP TABLE diet.bosch_credentials")
+        owner.execute("ALTER TABLE diet.sync_state "
+                      "DROP CONSTRAINT sync_state_connector_check")
+        owner.execute("""ALTER TABLE diet.sync_state ADD CONSTRAINT
+                         sync_state_connector_check
+                         CHECK (connector IN ('garmin', 'claude-mcp'))""")
+
+    def _migrate(self, owner_dsn):
+        from app import migrate
+        migrate.apply(owner_dsn, app_password="testpw", readonly_password="ropw")
+
+    def test_the_data_already_there_survives(self, owner, owner_dsn, user):
+        self._make_it_old(owner)
+        owner.execute(
+            """INSERT INTO diet.activities
+               (user_id, source, external_id, started_at, activity_type, kcal)
+               VALUES (%s, 'garmin', 'old', '2026-10-12 06:00+00', 'cycling', 540)""",
+            (user,))
+        self._migrate(owner_dsn)
+        row = owner.execute("SELECT source, kcal FROM diet.activities").fetchone()
+        assert row["source"] == "garmin" and row["kcal"] == 540
+
+    def test_the_new_writer_becomes_acceptable(self, owner, owner_dsn, user):
+        self._make_it_old(owner)
+        with pytest.raises(psycopg.errors.CheckViolation):
+            owner.execute("""INSERT INTO diet.activities
+                (user_id, source, external_id, started_at, activity_type)
+                VALUES (%s, 'bosch', 'b', now(), 'ebike_ride')""", (user,))
+        self._migrate(owner_dsn)
+        owner.execute("""INSERT INTO diet.activities
+            (user_id, source, external_id, started_at, activity_type)
+            VALUES (%s, 'bosch', 'b', now(), 'ebike_ride')""", (user,))
+
+    def test_the_added_columns_arrive_constrained(self, owner, owner_dsn, user):
+        """ADD COLUMN carries no CHECK. Without naming and replacing the
+        constraints, a migrated database would quietly accept a motor share of
+        1.5 that a fresh one refuses -- which is how this was first written."""
+        self._make_it_old(owner)
+        self._migrate(owner_dsn)
+        with pytest.raises(psycopg.errors.CheckViolation):
+            owner.execute("""INSERT INTO diet.activities
+                (user_id, source, external_id, started_at, activity_type,
+                 motor_energy_share)
+                VALUES (%s, 'bosch', 'b', now(), 'ebike_ride', 1.5)""", (user,))
+
+    def test_the_new_credential_table_comes_up_protected(self, owner, owner_dsn, dsns):
+        self._make_it_old(owner)
+        self._migrate(owner_dsn)
+        row = owner.execute(
+            "SELECT relrowsecurity, relforcerowsecurity FROM pg_class "
+            "WHERE oid = 'diet.bosch_credentials'::regclass").fetchone()
+        assert row["relrowsecurity"] and row["relforcerowsecurity"]
+        with psycopg.connect(dsns["ro"]) as c:
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                c.execute("SELECT 1 FROM diet.bosch_credentials")
+
+    def test_the_new_connector_can_record_its_syncs(self, owner, owner_dsn, user):
+        """sync_state has its own connector list, with the same trap: an inline
+        CHECK never reaches a database that already had the table."""
+        self._make_it_old(owner)
+        with pytest.raises(psycopg.errors.CheckViolation):
+            owner.execute("INSERT INTO diet.sync_state (user_id, connector) "
+                          "VALUES (%s, 'bosch')", (user,))
+        self._migrate(owner_dsn)
+        owner.execute("INSERT INTO diet.sync_state (user_id, connector) "
+                      "VALUES (%s, 'bosch')", (user,))
+
+    def test_migrating_twice_changes_nothing(self, owner, owner_dsn):
+        self._make_it_old(owner)
+        self._migrate(owner_dsn)
+        self._migrate(owner_dsn)

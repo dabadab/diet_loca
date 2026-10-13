@@ -22,7 +22,9 @@ fixtures create and drop databases.
 |---|---|---|
 | `test_garmin_parsing.py` | nothing | Garmin's shape is not a contract. A missing field must yield nothing, never a guess. |
 | `test_schema.py` | database | RLS is the entire tenant boundary; the CHECKs are the only thing between a plausible wrong number and the record. |
-| `test_poller.py` | database | The ingest path, with the network seam faked at `garmin.fetch_*`. |
+| `test_poller.py` | database | Both ingest paths, with the network seam faked at `garmin.fetch_*` and the Bosch session. |
+| `test_bosch_parsing.py` | nothing | Bosch publishes no schema at all; these pin the behaviour that holds whatever the field names turn out to be. |
+| `test_activity_matching.py` | database | One outing seen by two instruments: what counts as the same ride, and which rows the day's energy already contains. |
 | `test_days.py` | database | The figures the summary is built from — targets, ignored days, partial expenditure. |
 | `test_api.py` | database, server | Headers, cookie flags and the goal-scoped day window, over the wire. |
 | `test_mcp.py` | database, server | The tool surface over a real bearer token, and that no tool takes a user id. |

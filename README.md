@@ -140,6 +140,16 @@ effect, so switching from maintenance to a cut starts the scoring over instead
 of blending the two. Days before it stay in the day list with their own figures,
 dimmed, like any other day that is not counted.
 
+Ebike rides come from **Bosch Flow** as well, where the motor measures the
+rider's own pedal torque — so its calories are measured rather than guessed from
+heart rate, which overstates an assisted ride. Connect one with
+`manage.py bosch-login <email>`; it needs a browser once, because the Flow app's
+OAuth redirect is a mobile scheme a desktop cannot follow.
+
+A ride both devices saw appears twice, and `in_expenditure` says which rows the
+day's energy figures already contain — `false` means nothing counted that effort
+at all.
+
 The Summary also charts weight over the goal period, with a trend line. Scale
 readings are noisy and arrive with gaps, so the trend fits a line, smooths what
 is left on a ten-day *time* constant — a reading after a week away counts for

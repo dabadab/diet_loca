@@ -46,7 +46,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
-from . import config, db, garmin, secretbox
+from . import bosch, config, db, garmin, secretbox
 
 log = logging.getLogger("diet.poller")
 
@@ -64,12 +64,14 @@ INSERT INTO diet.activities
   (user_id, source, external_id, started_at, activity_type, name,
    duration_s, moving_s, distance_m, kcal, avg_hr, max_hr,
    elevation_gain_m, avg_speed_mps,
-   training_effect_aerobic, training_effect_anaerobic, hr_zones, raw)
-VALUES (diet.current_user_id(), 'garmin', %(external_id)s, %(started_at)s,
+   training_effect_aerobic, training_effect_anaerobic, hr_zones,
+   avg_cadence_rpm, avg_rider_power_w, motor_energy_share, raw)
+VALUES (diet.current_user_id(), %(source)s, %(external_id)s, %(started_at)s,
         %(activity_type)s, %(name)s, %(duration_s)s, %(moving_s)s, %(distance_m)s,
         %(kcal)s, %(avg_hr)s, %(max_hr)s, %(elevation_gain_m)s, %(avg_speed_mps)s,
         %(training_effect_aerobic)s, %(training_effect_anaerobic)s,
-        %(hr_zones)s, %(raw)s)
+        %(hr_zones)s, %(avg_cadence_rpm)s, %(avg_rider_power_w)s,
+        %(motor_energy_share)s, %(raw)s)
 ON CONFLICT (user_id, source, external_id) DO UPDATE SET
   started_at = EXCLUDED.started_at, activity_type = EXCLUDED.activity_type,
   name = EXCLUDED.name, duration_s = EXCLUDED.duration_s,
@@ -79,8 +81,25 @@ ON CONFLICT (user_id, source, external_id) DO UPDATE SET
   avg_speed_mps = EXCLUDED.avg_speed_mps,
   training_effect_aerobic = EXCLUDED.training_effect_aerobic,
   training_effect_anaerobic = EXCLUDED.training_effect_anaerobic,
-  hr_zones = EXCLUDED.hr_zones, raw = EXCLUDED.raw, ingested_at = now()
+  hr_zones = EXCLUDED.hr_zones,
+  avg_cadence_rpm = EXCLUDED.avg_cadence_rpm,
+  avg_rider_power_w = EXCLUDED.avg_rider_power_w,
+  motor_energy_share = EXCLUDED.motor_energy_share,
+  raw = EXCLUDED.raw, ingested_at = now()
 """
+
+
+# Each connector fills in what it measures; the statement names every column, so
+# the ones the other connector has no notion of have to arrive as NULL rather
+# than as a missing key.
+ACTIVITY_DEFAULTS = {
+    "name": None, "duration_s": None, "moving_s": None, "distance_m": None,
+    "kcal": None, "avg_hr": None, "max_hr": None, "elevation_gain_m": None,
+    "avg_speed_mps": None, "training_effect_aerobic": None,
+    "training_effect_anaerobic": None, "hr_zones": None,
+    "avg_cadence_rpm": None, "avg_rider_power_w": None,
+    "motor_energy_share": None,
+}
 
 
 def _owner_conn(settings):
@@ -90,11 +109,19 @@ def _owner_conn(settings):
     return psycopg.connect(settings.migration_database_url, row_factory=dict_row)
 
 
-def _accounts(settings, only_email: str | None) -> list[dict]:
+CREDENTIAL_TABLES = {"garmin": "diet.garmin_credentials",
+                     "bosch": "diet.bosch_credentials"}
+
+
+def _accounts(settings, only_email: str | None,
+              connector: str = "garmin") -> list[dict]:
+    """Accounts with a stored session for one connector. Enumerating users is
+    the one thing that genuinely needs the owner role."""
+    table = CREDENTIAL_TABLES[connector]          # never interpolated from input
     with _owner_conn(settings) as conn, conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(f"""
             SELECT u.user_id, u.email, u.timezone, c.secret_ciphertext, c.key_id
-            FROM diet.garmin_credentials c
+            FROM {table} c
             JOIN auth.users u USING (user_id)
             WHERE u.is_active AND (%s::text IS NULL OR u.email = lower(%s))
             ORDER BY u.email""", (only_email, only_email))
@@ -114,7 +141,19 @@ def _store_tokens(user_id, token_json: str) -> None:
                        WHERE user_id = diet.current_user_id()""", (ciphertext, key_id))
 
 
-def claim(user_id, min_gap_seconds: float = 90.0) -> bool:
+def _store_bosch_tokens(user_id, token_json: str) -> None:
+    """SingleKey rotates the refresh token on every use, so the new blob has to
+    replace the old one or the next run needs a human at a browser."""
+    ciphertext, key_id = secretbox.encrypt(token_json)
+    with db.user_tx(user_id) as cur:
+        cur.execute("""UPDATE diet.bosch_credentials
+                       SET secret_ciphertext = %s, key_id = %s, updated_at = now()
+                       WHERE user_id = diet.current_user_id()""",
+                    (ciphertext, key_id))
+
+
+def claim(user_id, min_gap_seconds: float = 90.0,
+          connector: str = "garmin") -> bool:
     """
     Take the right to sync this account, or report that something else has it.
 
@@ -125,11 +164,12 @@ def claim(user_id, min_gap_seconds: float = 90.0) -> bool:
     with db.user_tx(user_id) as cur:
         cur.execute("""
             INSERT INTO diet.sync_state (user_id, connector, last_attempt_at)
-            VALUES (diet.current_user_id(), 'garmin', now())
+            VALUES (diet.current_user_id(), %(connector)s, now())
             ON CONFLICT (user_id, connector) DO UPDATE SET last_attempt_at = now()
               WHERE diet.sync_state.last_attempt_at IS NULL
-                 OR diet.sync_state.last_attempt_at < now() - make_interval(secs => %s)
-            RETURNING 1""", (min_gap_seconds,))
+                 OR diet.sync_state.last_attempt_at
+                    < now() - make_interval(secs => %(gap)s)
+            RETURNING 1""", {"gap": min_gap_seconds, "connector": connector})
         return cur.fetchone() is not None
 
 
@@ -141,18 +181,20 @@ def credential_for(user_id) -> dict | None:
         return cur.fetchone()
 
 
-def _record(user_id, *, ok: bool, error: str | None) -> None:
+def _record(user_id, *, ok: bool, error: str | None,
+            connector: str = "garmin") -> None:
     with db.user_tx(user_id) as cur:
         cur.execute("""
             INSERT INTO diet.sync_state (user_id, connector, last_attempt_at,
                                          last_success_at, last_error)
-            VALUES (diet.current_user_id(), 'garmin', now(),
+            VALUES (diet.current_user_id(), %(connector)s, now(),
                     CASE WHEN %(ok)s THEN now() END, %(err)s)
             ON CONFLICT (user_id, connector) DO UPDATE
               SET last_attempt_at = now(),
                   last_success_at = CASE WHEN %(ok)s THEN now()
                                          ELSE diet.sync_state.last_success_at END,
-                  last_error = %(err)s""", {"ok": ok, "err": error})
+                  last_error = %(err)s""",
+            {"ok": ok, "err": error, "connector": connector})
 
 
 def _write_readings(user_id, tz: ZoneInfo, day: date,
@@ -181,15 +223,17 @@ def _write_readings(user_id, tz: ZoneInfo, day: date,
     return stored, rejected
 
 
-def _write_activities(user_id, rows: list[dict]) -> tuple[int, list[str]]:
+def _write_activities(user_id, rows: list[dict],
+                      source: str = "garmin") -> tuple[int, list[str]]:
     """Upsert a window's activities. Returns (stored, rejected descriptions)."""
     if not rows:
         return 0, []
     stored, rejected = 0, []
     with db.user_tx(user_id) as cur:
         for row in rows:
-            params = dict(row, raw=Json(row["raw"]),
-                          hr_zones=Json(row["hr_zones"]) if row["hr_zones"] else None)
+            params = dict(ACTIVITY_DEFAULTS, **row, source=source)
+            params["raw"] = Json(row["raw"])
+            params["hr_zones"] = Json(row["hr_zones"]) if row.get("hr_zones") else None
             cur.execute("SAVEPOINT activity")
             try:
                 cur.execute(ACTIVITY_UPSERT, params)
@@ -200,7 +244,7 @@ def _write_activities(user_id, rows: list[dict]) -> tuple[int, list[str]]:
                 # Same idea as _write_readings: Garmin sent something
                 # implausible, the schema caught it, the rest of the window
                 # stands.
-                rejected.append(f"{row['external_id']} "
+                rejected.append(f"{source} {row['external_id']} "
                                 f"({getattr(exc.diag, 'constraint_name', '?')})")
     return stored, rejected
 
@@ -290,13 +334,66 @@ def check_status(max_age: int) -> int:
     return 0
 
 
-def run_once(settings, args, raw_root: Path | None, days: int | None = None) -> int:
-    """One pass over every account. `days` overrides the configured window."""
+def _try_record(user_id, message: str, connector: str) -> None:
+    """Recording a failure must not itself become the failure."""
+    try:
+        _record(user_id, ok=False, error=message, connector=connector)
+    except Exception:
+        log.exception("%s: could not record failure", connector)
+
+
+def poll_bosch(account: dict, days: int,
+               raw_root: Path | None) -> tuple[int, list[str]]:
+    """
+    One account's ebike rides over the window. Returns (stored, rejected).
+
+    Separate from poll_user rather than folded into it: the two connectors have
+    nothing in common but the window, and one being down, rate-limited or
+    logged out must not cost the other its pass.
+    """
+    user_id = account["user_id"]
+    tz = ZoneInfo(account["timezone"])
+    token_json = secretbox.decrypt(account["secret_ciphertext"], account["key_id"])
+    session = bosch.resume(token_json)
+
+    today = datetime.now(tz).date()
+    start = today - timedelta(days=max(days - 1, 0))
+    raw_dir = (raw_root / account["email"]) if raw_root else None
+
+    try:
+        items = bosch.fetch_activities(session, start, today, raw_dir)
+    except bosch.RateLimited as exc:
+        raise RateLimited(str(exc)) from exc
+
+    rows = [r for r in (bosch.extract_activity(i) for i in items) if r]
+    stored, rejected = _write_activities(user_id, rows, source="bosch")
+
+    # Persist before anything else can fail: a rotated refresh token that is not
+    # stored is a login the rider has to redo by hand.
+    if session.refreshed:
+        _store_bosch_tokens(user_id, bosch.session_tokens(session))
+        log.info("bosch: refreshed tokens for %s", account["email"])
+    return stored, rejected
+
+
+def run_once(settings, args, raw_root: Path | None, days: int | None = None,
+             include_bosch: bool = True) -> int:
+    """
+    One pass over every account. `days` overrides the configured window.
+
+    `include_bosch` is false on the short cycle: a ride does not need
+    fifteen-minute latency, Bosch's rate limits are undocumented, and the short
+    cycle's whole virtue is that it is cheap. It is an argument rather than
+    something inferred from `days`, so that widening the short window cannot
+    quietly start calling a second API every quarter hour.
+    """
     window = args.days if days is None else days
     prune_raw(raw_root, args.keep_raw_days)
     accounts = _accounts(settings, args.user)
-    if not accounts:
-        log.warning("no Garmin credentials stored%s; nothing to do",
+    bosch_accounts = (_accounts(settings, args.user, "bosch")
+                      if include_bosch else [])
+    if not accounts and not bosch_accounts:
+        log.warning("no connector credentials stored%s; nothing to do",
                     f" for {args.user}" if args.user else "")
         _write_status(True, "no-accounts")
         return 0
@@ -335,6 +432,38 @@ def run_once(settings, args, raw_root: Path | None, days: int | None = None) -> 
                     _record(account["user_id"], ok=False, error=message)
                 except Exception:
                     log.exception("garmin: could not record failure for %s", email)
+
+        for account in bosch_accounts:
+            email = account["email"]
+            try:
+                if not claim(account["user_id"], connector="bosch"):
+                    log.info("bosch: %s skipped, a sync is already in flight", email)
+                    continue
+                rides, rejected = poll_bosch(account, window, raw_root)
+                _record(account["user_id"], ok=True, error=None, connector="bosch")
+                log.info("bosch: %s stored %d ride(s) over %d day(s)%s",
+                         email, rides, window,
+                         f", {len(rejected)} rejected: {'; '.join(rejected[:4])}"
+                         if rejected else "")
+            except RateLimited as exc:
+                failures += 1
+                rate_limited = True
+                message = f"Bosch rate-limited this client: {exc}"[:400]
+                log.error("bosch: %s %s", email, message)
+                _try_record(account["user_id"], message, "bosch")
+            except bosch.NeedsLogin as exc:
+                # Not a transient failure: the refresh token is spent and only a
+                # person at a browser can mint another, so say which command.
+                failures += 1
+                message = (f"Bosch session expired; run "
+                           f"`manage.py bosch-login {email}`: {exc}")[:400]
+                log.error("bosch: %s", message)
+                _try_record(account["user_id"], message, "bosch")
+            except Exception as exc:
+                failures += 1
+                message = f"{type(exc).__name__}: {exc}"[:400]
+                log.error("bosch: %s failed: %s", email, message)
+                _try_record(account["user_id"], message, "bosch")
     finally:
         db.close_pool()
 
@@ -435,9 +564,10 @@ def main() -> int:
     # revisions, which do not need checking every quarter hour. Fetching the
     # full window at the short interval would multiply the request count
     # against an API that has already rate-limited this deployment.
-    def cycle(window: int, label: str) -> int:
+    def cycle(window: int, label: str, include_bosch: bool = True) -> int:
         try:
-            return run_once(settings, args, raw_root, days=window)
+            return run_once(settings, args, raw_root, days=window,
+                            include_bosch=include_bosch)
         except Exception:
             # A crash must not end the loop; the status file records it.
             log.exception("garmin: %s cycle raised", label)
@@ -465,7 +595,7 @@ def main() -> int:
                 # The full pass covered today, so the next short one can wait.
                 next_small = now + args.interval_small + jitter(args.interval_small)
             elif now >= next_small:
-                code = cycle(args.small_days, "today")
+                code = cycle(args.small_days, "today", include_bosch=False)
                 next_small = now + args.interval_small + jitter(args.interval_small)
             if code == 2:
                 # Retrying into a rate limit only deepens it.
