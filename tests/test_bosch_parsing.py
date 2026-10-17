@@ -365,10 +365,98 @@ class TestLocalCallback:
             self, monkeypatch):
         mod = self._with_port(monkeypatch, 4200)
         try:
-            assert mod.uses_local_callback() is True
+            assert mod.is_http_callback() is True
             assert mod.API_BASE == mod.DATA_ACT_HOST
         finally:
             monkeypatch.undo()
             __import__("importlib").reload(bosch)
-        assert bosch.uses_local_callback() is False, \
+        assert bosch.is_http_callback() is False, \
             "the app client's mobile scheme still needs the paste"
+
+
+class TestWhereTheBrowserIs:
+    """
+    The app runs in Docker on a server; the rider's browser is on a laptop. A
+    listener on the container's own localhost is unreachable from where the
+    sign-in happens, so defaulting to it would wait five minutes for a callback
+    that was never coming.
+    """
+
+    @staticmethod
+    def _reload(monkeypatch, **env):
+        import importlib
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        return importlib.reload(bosch)
+
+    def test_a_container_is_assumed_not_to_have_the_browser(self, monkeypatch):
+        mod = self._reload(monkeypatch, BOSCH_CLIENT_ID="x",
+                           BOSCH_REDIRECT_URI="http://localhost:4200")
+        try:
+            monkeypatch.setattr("os.path.exists",
+                                lambda p: True if p == "/.dockerenv" else False)
+            assert mod.in_container() is True
+            assert mod.is_http_callback() is True
+            # what manage.py computes: listen only when both hold
+            assert not (mod.is_http_callback() and not mod.in_container())
+        finally:
+            monkeypatch.undo()
+            __import__("importlib").reload(bosch)
+
+    def test_off_a_container_the_callback_is_caught_automatically(self, monkeypatch):
+        mod = self._reload(monkeypatch, BOSCH_CLIENT_ID="x",
+                           BOSCH_REDIRECT_URI="http://localhost:4200")
+        try:
+            monkeypatch.setattr("os.path.exists", lambda p: False)
+            assert mod.in_container() is False
+            assert mod.is_http_callback() and not mod.in_container()
+        finally:
+            monkeypatch.undo()
+            __import__("importlib").reload(bosch)
+
+    def test_a_mobile_scheme_is_never_an_http_callback(self):
+        """It is handed to the OS rather than fetched, so nothing reaches the
+        address bar and devtools is the only place left to look."""
+        assert bosch.REDIRECT_URI.startswith("onebikeapp-ios://")
+        assert bosch.is_http_callback() is False
+
+    def test_the_code_is_read_out_of_a_pasted_address_bar(self):
+        """What a failed localhost redirect leaves on screen."""
+        assert bosch.code_from_redirect(
+            "http://localhost:4200/?code=AbC123&scope=openid&state=xy") == "AbC123"
+
+
+class TestPreflightMessageFitsTheClient:
+    @staticmethod
+    def _misconfigured(monkeypatch):
+        class Reply:
+            status_code = 302
+            headers = {"location": "/errors/misconfigured-application?errorId=x"}
+        import httpx2
+        monkeypatch.setattr(httpx2, "get", lambda *a, **k: Reply())
+
+    def test_a_registered_client_is_told_to_check_its_registration(
+            self, monkeypatch):
+        """Blaming the withdrawn app client would be wrong and unhelpful when
+        the rider is using an id of their own."""
+        import importlib
+        monkeypatch.setenv("BOSCH_CLIENT_ID", "mine-from-the-portal")
+        mod = importlib.reload(bosch)
+        try:
+            self._misconfigured(monkeypatch)
+            with pytest.raises(bosch.NeedsLogin) as caught:
+                mod.check_client("https://x/")
+            message = str(caught.value)
+            assert "BOSCH_CLIENT_ID" in message
+            assert "recipient URL" in message, "the likeliest mismatch"
+            assert "withdrawn" not in message
+        finally:
+            monkeypatch.undo()
+            importlib.reload(bosch)
+
+    def test_the_builtin_client_is_reported_as_withdrawn(self, monkeypatch):
+        self._misconfigured(monkeypatch)
+        with pytest.raises(bosch.NeedsLogin) as caught:
+            bosch.check_client("https://x/")
+        assert "withdrawn" in str(caught.value)
+        assert "data-act" in str(caught.value)

@@ -126,23 +126,52 @@ def check_client(url: str) -> None:
         log.warning("bosch: could not pre-check the client: %s", exc)
         return                      # a network blip is not a verdict
     location = reply.headers.get("location", "")
-    if "misconfigured-application" in location:
+    if "misconfigured-application" not in location:
+        return
+
+    head = f"SingleKey does not recognise the client id {CLIENT_ID!r}.\n\n"
+    if os.environ.get("BOSCH_CLIENT_ID"):
+        # A client the rider registered themselves. The id is probably right and
+        # something about its registration is not, so point at that rather than
+        # at the withdrawn app client, which is not what they are using.
         raise NeedsLogin(
-            f"SingleKey does not recognise the client id {CLIENT_ID!r}.\n\n"
-            "This is the undocumented client the Flow app itself uses, and it "
-            "answers an invented client id with this same error -- so it has "
-            "been changed or withdrawn, and no amount of retrying will help.\n\n"
-            "Two routes that do not depend on it:\n"
-            "  * register your own client at portal.bosch-ebike.com/data-act "
-            "(the EU Data Act gives you a right to this data, and the client is "
-            "yours rather than borrowed), then set BOSCH_CLIENT_ID\n"
-            "  * read the rides from Strava, which Flow syncs to officially")
+            head +
+            "That is the id from BOSCH_CLIENT_ID, so the registration is the "
+            "thing to check at portal.bosch-ebike.com/data-act:\n\n"
+            f"  * does the client still exist, and is the id exactly {CLIENT_ID!r}?\n"
+            f"  * is {REDIRECT_URI!r} registered as its recipient URL, character "
+            "for character? A trailing slash counts.\n"
+            "  * were the data-recipient terms accepted?\n\n"
+            "SingleKey gives this same answer for an unknown id and a mismatched "
+            "redirect, so it cannot tell you which of those it is.")
+    raise NeedsLogin(
+        head +
+        "This is the undocumented client the Flow app itself uses, and SingleKey "
+        "answers an invented client id with exactly the same error -- so it has "
+        "been withdrawn, and no amount of retrying will help.\n\n"
+        "Two routes that do not depend on it:\n"
+        "  * register your own client at portal.bosch-ebike.com/data-act (the EU "
+        "Data Act gives you a right to this data, and the client is yours rather "
+        "than borrowed), then set BOSCH_CLIENT_ID\n"
+        "  * read the rides from Strava, which Flow syncs to officially")
 
 
-def uses_local_callback() -> bool:
-    """Whether the browser can follow the redirect itself."""
-    return REDIRECT_URI.startswith("http://localhost") or \
-        REDIRECT_URI.startswith("http://127.0.0.1")
+def is_http_callback() -> bool:
+    """Whether the redirect is one a browser will follow at all."""
+    return REDIRECT_URI.startswith(("http://localhost", "http://127.0.0.1"))
+
+
+def in_container() -> bool:
+    """
+    Whether this is running somewhere the rider's browser almost certainly is
+    not.
+
+    The deployment this was written for runs the app in Docker on a server and
+    the browser on a laptop, so a listener on the container's own localhost is
+    unreachable from where the sign-in happens. Catching that by default beats
+    waiting five minutes for a callback that was never going to arrive.
+    """
+    return os.path.exists("/.dockerenv")
 
 
 def listen_for_code(timeout: float = 300.0) -> str:

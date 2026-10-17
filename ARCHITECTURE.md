@@ -481,12 +481,34 @@ under the deployment the way the app's was. `BOSCH_CLIENT_ID`,
 settings, not literals: none of it is documented anywhere readable without an
 account, so the code must be steerable from outside.
 
-That route is also pleasanter, for one structural reason: a registered client
-nominates its own recipient URL, so it can be `http://localhost:4200` — which a
-browser will actually follow. `bosch-login` runs a one-shot local server and
-catches the code itself. The app client's `onebikeapp-ios://` could not be
-followed by any desktop browser, which is why that path needed a redirect fished
-out of devtools by hand; it survives as a fallback and says so.
+That route is also pleasanter, and for a reason that survives the deployment
+being split across two machines. A registered client nominates its own recipient
+URL, so it can be `http://localhost:4200` — a URL a browser will actually
+follow. Two cases follow from where that browser is:
+
+- **Same machine**: `bosch-login` runs a one-shot local server and catches the
+  code itself. Nothing to copy.
+- **Browser on a laptop, app in Docker on a server** — which is this
+  deployment: a listener on the container's localhost is unreachable from where
+  the sign-in happens. But the redirect still *fails usefully*. The browser
+  lands on "unable to connect" with the full callback URL, code and all, sitting
+  in the address bar. Copying it from there needs no devtools and no tunnel.
+
+`manage.py bosch-login` picks between them by testing for `/.dockerenv`, since
+running in a container is a reliable sign the browser is elsewhere; `--listen`
+and `--paste` override it. Defaulting to the listener would have meant waiting
+five minutes for a callback that was never coming.
+
+The app client's `onebikeapp-ios://` is the one case with neither convenience: a
+custom scheme is handed to the OS rather than fetched, so nothing reaches the
+address bar and the URL has to come out of a devtools network pane. That path
+survives as a fallback and says so.
+
+The preflight message is branched on whose client it is. Telling someone whose
+own registered id was rejected that "the Flow app's client has been withdrawn"
+would be both wrong and useless; they are pointed at their registration instead,
+and specifically at the recipient URL, since SingleKey answers an unknown id and
+a mismatched redirect identically and cannot say which it hit.
 
 `bosch-login` checks whether the client is recognised *before* sending anyone to
 a browser. Cheap checks before expensive ones — the lesson `garmin-login` learnt

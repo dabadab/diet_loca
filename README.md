@@ -146,9 +146,15 @@ heart rate, which overstates an assisted ride.
 
 Bosch publishes no API, and the Flow app's own client id is no longer accepted,
 so this goes through the **EU Data Act**: register a client of your own at
-[portal.bosch-ebike.com/data-act](https://portal.bosch-ebike.com/data-act), put
-its id in `BOSCH_CLIENT_ID`, and run `manage.py bosch-login <email>` once on the
-machine your browser is on. It catches the callback itself.
+[portal.bosch-ebike.com/data-act](https://portal.bosch-ebike.com/data-act) with
+`http://localhost:4200` as its recipient URL, put its id in `BOSCH_CLIENT_ID`,
+and run `manage.py bosch-login <email>` once.
+
+If the browser is on the same machine, that catches the callback by itself. If
+the app is in Docker on a server and you are browsing from a laptop — the usual
+case — it prints a URL to open, and the sign-in ends on an "unable to connect"
+page whose **address bar** holds the code. Paste that URL back. No devtools, no
+tunnel.
 
 A ride both devices saw appears twice, and `in_expenditure` says which rows the
 day's energy figures already contain — `false` means nothing counted that effort

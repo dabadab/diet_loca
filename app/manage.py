@@ -357,23 +357,43 @@ def cmd_bosch_login(args) -> None:
     except bosch.NeedsLogin as exc:
         sys.exit(f"{exc}")
 
-    if bosch.uses_local_callback():
-        # A registered client nominates its own recipient URL, so it can be
-        # localhost -- which the browser will actually follow. No copy-paste.
-        print(f"\nOpen this and sign in with your SingleKey ID:\n")
+    # Where is the browser? If this is running in a container on a server, it
+    # is not here, and a listener on this machine's localhost will never be
+    # reached. --listen / --paste override the guess.
+    listen = args.listen if args.listen is not None else (
+        bosch.is_http_callback() and not bosch.in_container())
+
+    if listen:
+        print("\nOpen this and sign in with your SingleKey ID:\n")
         print(f"   {url}\n")
         print(f"Waiting for the callback on {bosch.REDIRECT_URI} ...")
-        print("(this has to run where your browser is, not inside the container)")
         try:
             code = bosch.listen_for_code()
         except bosch.BoschError as exc:
+            sys.exit(f"Bosch login failed: {exc}\n\n"
+                     "If your browser is on another machine, re-run with "
+                     "--paste.")
+    elif bosch.is_http_callback():
+        # The happy case for a split setup. Nothing is listening on the
+        # browser's localhost, so the final redirect fails -- but it fails
+        # *after* the address bar has the code in it, in plain sight. No
+        # devtools, no network panel, just the URL that is already on screen.
+        print("\n1. On the machine with your browser, open this and sign in:\n")
+        print(f"   {url}\n")
+        print("2. The last step will land on a page that cannot load -- "
+              '"unable to connect" or similar.')
+        print("   That is expected and means it worked: nothing is listening on")
+        print(f"   {bosch.REDIRECT_URI} over there.\n")
+        print("3. Copy the whole URL out of the ADDRESS BAR of that failed page.")
+        print("   It contains ?code=... — that is what this needs.\n")
+        redirect = input("4. Paste it here: ").strip()
+        try:
+            code = bosch.code_from_redirect(redirect)
+        except bosch.BoschError as exc:
             sys.exit(f"Bosch login failed: {exc}")
     else:
-        # The app's own client uses a mobile scheme no desktop browser follows,
-        # so the redirect has to be fished out by hand. A browser never makes a
-        # network request to it -- it hands the URL to the OS -- so there is no
-        # such row in the network panel; what is there is the 302 that points
-        # at it, with the URL in its location header.
+        # A custom scheme the browser hands to the OS rather than fetching, so
+        # nothing reaches the address bar and it has to come out of devtools.
         print("\n1. Open devtools FIRST (F12), Network tab, tick 'Preserve log'.\n")
         print("2. Open this and sign in with your Bosch SingleKey ID:\n")
         print(f"   {url}\n")
@@ -583,6 +603,12 @@ def main() -> None:
 
     bl = sub.add_parser("bosch-login", help="store encrypted Bosch Flow tokens")
     bl.add_argument("email")
+    bl.add_argument("--listen", dest="listen", action="store_true", default=None,
+                    help="catch the callback on this machine (browser is here)")
+    bl.add_argument("--paste", dest="listen", action="store_false",
+                    help="print the URL and take the redirect back by hand "
+                         "(browser is on another machine; the default in a "
+                         "container)")
     bl.set_defaults(fn=cmd_bosch_login)
 
     bp = sub.add_parser("bosch-probe",
