@@ -389,9 +389,10 @@ def run_once(settings, args, raw_root: Path | None, days: int | None = None,
     """
     window = args.days if days is None else days
     prune_raw(raw_root, args.keep_raw_days)
-    accounts = _accounts(settings, args.user)
+    only = getattr(args, "only", None)
+    accounts = [] if only == "bosch" else _accounts(settings, args.user)
     bosch_accounts = (_accounts(settings, args.user, "bosch")
-                      if include_bosch else [])
+                      if include_bosch and only != "garmin" else [])
     if not accounts and not bosch_accounts:
         log.warning("no connector credentials stored%s; nothing to do",
                     f" for {args.user}" if args.user else "")
@@ -508,6 +509,9 @@ def main() -> int:
     ap.add_argument("--days", type=int, default=int(os.environ.get("GARMIN_POLL_DAYS", "3")),
                     help="trailing days to re-fetch (sleep lands late; upserts are idempotent)")
     ap.add_argument("--user", default=None, help="limit to one account by email")
+    ap.add_argument("--only", choices=("garmin", "bosch"), default=None,
+                    help="sync just one connector -- to backfill Bosch rides over a "
+                         "long --days window without re-fetching a month of Garmin")
     ap.add_argument("--raw-dir", default=os.environ.get("GARMIN_RAW_DIR", "/var/log/diet/garmin"),
                     help="where raw payloads are archived; empty to skip")
     ap.add_argument("--keep-raw-days", type=int,
