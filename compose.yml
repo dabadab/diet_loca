@@ -64,6 +64,8 @@ services:
       BOSCH_REDIRECT_URI: ${BOSCH_REDIRECT_URI:-}
       BOSCH_API_BASE: ${BOSCH_API_BASE:-}
       BOSCH_ACTIVITY_PATH: ${BOSCH_ACTIVITY_PATH:-}
+      BOSCH_ISSUER: ${BOSCH_ISSUER:-}
+      BOSCH_SCOPES: ${BOSCH_SCOPES:-}
       GARMIN_RAW_DIR: /var/log/diet/garmin
       TZ: ${TZ:-UTC}
     volumes:
@@ -97,6 +99,8 @@ services:
       BOSCH_REDIRECT_URI: ${BOSCH_REDIRECT_URI:-}
       BOSCH_API_BASE: ${BOSCH_API_BASE:-}
       BOSCH_ACTIVITY_PATH: ${BOSCH_ACTIVITY_PATH:-}
+      BOSCH_ISSUER: ${BOSCH_ISSUER:-}
+      BOSCH_SCOPES: ${BOSCH_SCOPES:-}
       GARMIN_POLL_LOOP: "1"
       # Today, often and cheaply; the trailing window, rarely.
       GARMIN_POLL_INTERVAL_SMALL: ${GARMIN_POLL_INTERVAL_SMALL:-900}

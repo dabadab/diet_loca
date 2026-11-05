@@ -41,17 +41,40 @@ from .fieldmap import (FieldSpec, apply_specs, describe_payload, dig, parse_utc,
 log = logging.getLogger("diet.bosch")
 
 # --- the identity provider -------------------------------------------------
-# Plain OIDC, from https://singlekey-id.com/auth/.well-known/openid-configuration
-ISSUER = "https://singlekey-id.com/auth"
-AUTHORIZE_URL = f"{ISSUER}/connect/authorize"
-TOKEN_URL = f"{ISSUER}/connect/token"
+# Two identity providers, because there are two kinds of client. The Flow app's
+# own client signs in at SingleKey. A client registered at the Data Act portal
+# (ids look like `euda-<uuid>`) does not: Bosch's portal gives the Keycloak
+# realm below as the login address for those, and SingleKey has never heard of
+# the id -- it answers "misconfigured application", exactly as it does for an
+# invented one. Both from the providers' openid-configuration documents.
+SINGLEKEY_ISSUER = "https://singlekey-id.com/auth"
+DATA_ACT_ISSUER = "https://p9.authz.bosch.com/auth/realms/obc"
+
+_client_id_env = os.environ.get("BOSCH_CLIENT_ID") or ""
+ISSUER = (os.environ.get("BOSCH_ISSUER")
+          or (DATA_ACT_ISSUER if _client_id_env.startswith("euda-")
+              else SINGLEKEY_ISSUER)).rstrip("/")
+IS_KEYCLOAK = ISSUER != SINGLEKEY_ISSUER
+if IS_KEYCLOAK:
+    AUTHORIZE_URL = f"{ISSUER}/protocol/openid-connect/auth"
+    TOKEN_URL = f"{ISSUER}/protocol/openid-connect/token"
+    IDP = "Bosch's login"
+else:
+    AUTHORIZE_URL = f"{ISSUER}/connect/authorize"
+    TOKEN_URL = f"{ISSUER}/connect/token"
+    IDP = "SingleKey"
 # The Flow app's own public client. SingleKey no longer recognises it -- it
 # answers with the same "misconfigured application" it gives an invented id --
 # so both are overridable, which is what a client registered at
 # portal.bosch-ebike.com/data-act needs.
 CLIENT_ID = os.environ.get("BOSCH_CLIENT_ID") or "one-bike-app"
 REDIRECT_URI = os.environ.get("BOSCH_REDIRECT_URI") or "onebikeapp-ios://"
-SCOPES = "openid profile email offline_access"
+# The realm advertises hundreds of scopes, most of them other clients'. Asking
+# for one a client was not given fails the whole login, so a Data Act client
+# starts from the two it certainly needs and BOSCH_SCOPES widens it.
+SCOPES = (os.environ.get("BOSCH_SCOPES")
+          or ("openid offline_access" if IS_KEYCLOAK
+              else "openid profile email offline_access"))
 
 # Two different backends depending on which client you hold. The app's own
 # endpoints went with its client id; the Data Act host is what a client
@@ -125,6 +148,19 @@ def check_client(url: str) -> None:
     except Exception as exc:
         log.warning("bosch: could not pre-check the client: %s", exc)
         return                      # a network blip is not a verdict
+    if IS_KEYCLOAK:
+        # Keycloak does not redirect to an error page: it renders one, with a
+        # 400, and names the parameter it objects to.
+        if reply.status_code == 400:
+            body = " ".join((reply.text or "").split())
+            raise NeedsLogin(
+                f"Bosch's login refused the request for client {CLIENT_ID!r}:\n\n"
+                f"  {body[:300]}\n\n"
+                f"Check at portal.bosch-ebike.com/data-act that {REDIRECT_URI!r} "
+                "is registered as a redirect URI character for character (a "
+                "trailing slash counts), and that Bosch has approved the client "
+                "-- an unapproved one can be refused for days.")
+        return
     location = reply.headers.get("location", "")
     if "misconfigured-application" not in location:
         return
@@ -139,7 +175,7 @@ def check_client(url: str) -> None:
             "That is the id from BOSCH_CLIENT_ID, so the registration is the "
             "thing to check at portal.bosch-ebike.com/data-act:\n\n"
             f"  * does the client still exist, and is the id exactly {CLIENT_ID!r}?\n"
-            f"  * is {REDIRECT_URI!r} registered as its recipient URL, character "
+            f"  * is {REDIRECT_URI!r} registered as its redirect URI, character "
             "for character? A trailing slash counts.\n"
             "  * were the data-recipient terms accepted?\n\n"
             "SingleKey gives this same answer for an unknown id and a mismatched "
@@ -180,7 +216,7 @@ def listen_for_code(timeout: float = 300.0) -> str:
     something civil to show for it.
 
     Only possible because a client registered at the Data Act portal nominates
-    its own recipient URL, so it can be http://localhost -- which a browser will
+    its own redirect URI, so it can be http://localhost -- which a browser will
     actually follow, unlike the app's onebikeapp-ios:// scheme. This is the
     whole reason that route is pleasanter: no devtools, no copy-paste.
     """
@@ -273,12 +309,12 @@ def _post_token(form: dict) -> dict:
         reply = httpx.post(TOKEN_URL, data={"client_id": CLIENT_ID, **form},
                            timeout=30)
     except Exception as exc:
-        raise BoschError(f"could not reach SingleKey: {exc}") from exc
+        raise BoschError(f"could not reach {IDP}: {exc}") from exc
     if reply.status_code >= 400:
         detail = reply.text[:200]
         if reply.status_code in (400, 401):
-            raise NeedsLogin(f"SingleKey refused the grant: {detail}")
-        raise BoschError(f"SingleKey returned {reply.status_code}: {detail}")
+            raise NeedsLogin(f"{IDP} refused the grant: {detail}")
+        raise BoschError(f"{IDP} returned {reply.status_code}: {detail}")
     return reply.json()
 
 

@@ -482,7 +482,7 @@ settings, not literals: none of it is documented anywhere readable without an
 account, so the code must be steerable from outside.
 
 That route is also pleasanter, and for a reason that survives the deployment
-being split across two machines. A registered client nominates its own recipient
+being split across two machines. A registered client nominates its own redirect
 URL, so it can be `http://localhost:4200` — a URL a browser will actually
 follow. Two cases follow from where that browser is:
 
@@ -507,7 +507,7 @@ survives as a fallback and says so.
 The preflight message is branched on whose client it is. Telling someone whose
 own registered id was rejected that "the Flow app's client has been withdrawn"
 would be both wrong and useless; they are pointed at their registration instead,
-and specifically at the recipient URL, since SingleKey answers an unknown id and
+and specifically at the redirect URI, since SingleKey answers an unknown id and
 a mismatched redirect identically and cannot say which it hit.
 
 `bosch-login` checks whether the client is recognised *before* sending anyone to

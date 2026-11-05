@@ -147,7 +147,7 @@ heart rate, which overstates an assisted ride.
 Bosch publishes no API, and the Flow app's own client id is no longer accepted,
 so this goes through the **EU Data Act**: register a client of your own at
 [portal.bosch-ebike.com/data-act](https://portal.bosch-ebike.com/data-act) with
-`http://localhost:4200` as its recipient URL, put its id in `BOSCH_CLIENT_ID`,
+`http://localhost:4200` as its redirect URI, put its id in `BOSCH_CLIENT_ID`,
 and run `manage.py bosch-login <email>` once.
 
 If the browser is on the same machine, that catches the callback by itself. If

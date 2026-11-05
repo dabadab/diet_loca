@@ -260,7 +260,7 @@ class TestClientPreflight:
 
 class TestLocalCallback:
     """
-    A client registered at Bosch's Data Act portal nominates its own recipient
+    A client registered at Bosch's Data Act portal nominates its own redirect
     URL, so it can be localhost -- which a browser will actually follow, unlike
     the app client's mobile scheme. That is what removes the devtools step, so
     it is worth a test that really binds a socket.
@@ -448,7 +448,7 @@ class TestPreflightMessageFitsTheClient:
                 mod.check_client("https://x/")
             message = str(caught.value)
             assert "BOSCH_CLIENT_ID" in message
-            assert "recipient URL" in message, "the likeliest mismatch"
+            assert "redirect URI" in message, "the likeliest mismatch"
             assert "withdrawn" not in message
         finally:
             monkeypatch.undo()
@@ -460,3 +460,48 @@ class TestPreflightMessageFitsTheClient:
             bosch.check_client("https://x/")
         assert "withdrawn" in str(caught.value)
         assert "data-act" in str(caught.value)
+
+
+class TestDataActClientsUseBoschsOwnLogin:
+    """A `euda-` client id belongs to Bosch's Keycloak realm. SingleKey has
+    never heard of it and says so exactly as it does for an invented id."""
+
+    @staticmethod
+    def _reload(monkeypatch, **env):
+        import importlib
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        return importlib.reload(bosch)
+
+    def test_a_euda_id_goes_to_the_keycloak_realm(self, monkeypatch):
+        try:
+            mod = self._reload(monkeypatch, BOSCH_CLIENT_ID="euda-abc",
+                               BOSCH_REDIRECT_URI="http://localhost:4200")
+            url, _ = mod.start_login()
+            assert url.startswith("https://p9.authz.bosch.com/auth/realms/obc/"
+                                  "protocol/openid-connect/auth?")
+            assert mod.TOKEN_URL.endswith("/protocol/openid-connect/token")
+            assert "scope=openid+offline_access" in url
+        finally:
+            monkeypatch.undo()
+            import importlib
+            importlib.reload(bosch)
+
+    def test_the_builtin_client_stays_on_singlekey(self):
+        assert bosch.AUTHORIZE_URL.startswith("https://singlekey-id.com/auth/")
+
+    def test_a_keycloak_400_is_reported_with_its_own_words(self, monkeypatch):
+        try:
+            mod = self._reload(monkeypatch, BOSCH_CLIENT_ID="euda-abc")
+            class Reply:
+                status_code = 400
+                headers = {}
+                text = "<p>Invalid parameter: redirect_uri</p>"
+            import httpx2
+            monkeypatch.setattr(httpx2, "get", lambda *a, **k: Reply())
+            with pytest.raises(mod.NeedsLogin, match="redirect_uri"):
+                mod.check_client("https://x/")
+        finally:
+            monkeypatch.undo()
+            import importlib
+            importlib.reload(bosch)
