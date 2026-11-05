@@ -568,6 +568,54 @@ def fetch_activities(session: Session, start: date_cls, end: date_cls,
     return items
 
 
+def fetch_details(session: Session, activity_id: str) -> list[dict]:
+    """
+    One ride's samples: distance, speed, cadence, rider power and, when a watch
+    was broadcasting, heart rate -- plus a position, which callers must not keep.
+
+    Only the probe uses this so far. The documented sample has no timestamp, so
+    how much time a sample stands for is not known, and turning samples into
+    seconds-per-heart-rate-zone needs that first.
+    """
+    payload = session.get(f"{API_BASE}{ACTIVITY_PATH}/{activity_id}/details")
+    samples = payload.get("activityDetails") if isinstance(payload, dict) else payload
+    return [x for x in samples if isinstance(x, dict)] if isinstance(samples, list) else []
+
+
+def describe_details(samples: list[dict], summary: dict | None = None) -> list[str]:
+    """What a details payload looks like, without a single coordinate in it."""
+    if not samples:
+        return ["no samples returned"]
+    lines = [f"{len(samples)} sample(s)"]
+    keys: dict[str, int] = {}
+    for x in samples:
+        for k in x:
+            keys[k] = keys.get(k, 0) + 1
+    shown = sorted(k for k in keys if not any(
+        h in k.lower() for h in ("lat", "lon", "coord", "geo", "polyline")))
+    lines.append("keys (samples carrying each): " + ", ".join(
+        f"{k}={keys[k]}" for k in shown))
+    hr = [x["heartRate"] for x in samples
+          if isinstance(x.get("heartRate"), (int, float))]
+    if hr:
+        lines.append(f"heartRate: {len(hr)} sample(s), min {min(hr)}, "
+                     f"mean {sum(hr) / len(hr):.0f}, max {max(hr)}")
+    else:
+        lines.append("heartRate: none")
+    if summary:
+        start, end = (parse_utc(summary.get("startTime")),
+                      parse_utc(summary.get("endTime")))
+        moving = summary.get("durationWithoutStops")
+        if start and end and moving:
+            elapsed = (end - start).total_seconds()
+            lines.append(
+                f"the ride: {elapsed:.0f} s elapsed, {moving} s in motion -> "
+                f"{elapsed / len(samples):.2f} s/sample if samples span the "
+                f"elapsed time, {moving / len(samples):.2f} s/sample if only "
+                f"motion")
+    return lines
+
+
 def probe(session: Session, start: date_cls, end: date_cls) -> list[str]:
     """
     What a real payload actually contains, for correcting ACTIVITY_SPECS.

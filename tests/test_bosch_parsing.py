@@ -545,3 +545,33 @@ class TestFetchPagesThroughTheWindow:
         fake = self.FakeSession(rides)
         got = bosch.fetch_activities(fake, date(2026, 10, 1), date(2026, 11, 5))
         assert len(got) == 60 and len(fake.calls) == 2
+
+
+class TestDetailsShape:
+    SAMPLES = [{"distance": 10, "speed": 20.0, "heartRate": 100,
+                "latitude": 48.5, "longitude": 9.1},
+               {"distance": 20, "speed": 21.0, "heartRate": 110,
+                "latitude": 48.6, "longitude": 9.2},
+               {"distance": 20, "speed": 0.0, "latitude": 48.6, "longitude": 9.2}]
+
+    def test_it_never_shows_a_position(self):
+        text = "\n".join(bosch.describe_details(self.SAMPLES))
+        assert "latitude" not in text and "longitude" not in text
+        assert "48.5" not in text
+
+    def test_it_reports_heart_rate_coverage_and_sample_spacing(self):
+        lines = bosch.describe_details(
+            self.SAMPLES, {"startTime": "2026-10-29T18:00:00Z",
+                           "endTime": "2026-10-29T18:00:30Z",
+                           "durationWithoutStops": 15})
+        text = "\n".join(lines)
+        assert "3 sample(s)" in text and "heartRate=2" in text
+        assert "2 sample(s), min 100, mean 105, max 110" in text
+        assert "10.00 s/sample" in text and "5.00 s/sample" in text
+
+    def test_a_payload_that_is_not_a_list_is_empty(self):
+        class S:
+            def get(self, url, **p):
+                return {"activityDetails": "nope"}
+        assert bosch.fetch_details(S(), "x") == []
+        assert bosch.describe_details([]) == ["no samples returned"]

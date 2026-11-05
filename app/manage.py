@@ -473,6 +473,27 @@ def cmd_bosch_probe(args) -> None:
                               sort="-startTime")
         print(_json.dumps(payload, indent=2, default=str)[:4000])
         return
+    if args.details:
+        # One ride's per-sample payload, for working out what a sample stands
+        # for before any heart-rate zones are derived from it.
+        rides = bosch.fetch_activities(session, today - timedelta(days=args.days),
+                                       today)
+        by_id = {str(r.get("id")): r for r in rides if isinstance(r, dict)}
+        if args.details == "latest":
+            ride = next((r for r in rides
+                         if isinstance(r.get("heartRate"), dict)
+                         and r["heartRate"].get("average") is not None), None)
+        else:
+            ride = by_id.get(args.details)
+        if ride is None:
+            sys.exit("no such ride in that window (or none with heart rate)")
+        print(f"ride {ride['id']} {ride.get('title')!r} started {ride.get('startTime')}")
+        try:
+            samples = bosch.fetch_details(session, str(ride["id"]))
+        except bosch.BoschError as exc:
+            sys.exit(f"details failed: {exc}")
+        print("\n".join(bosch.describe_details(samples, ride)))
+        return
     lines = bosch.probe(session, today - timedelta(days=args.days), today)
     if not lines:
         sys.exit(f"no rides returned for the last {args.days} days")
@@ -620,6 +641,10 @@ def main() -> None:
     bp.add_argument("--path", default=None,
                     help="raw request against this API path, for finding the "
                          "ride endpoint from the portal's documentation")
+    bp.add_argument("--details", nargs="?", const="latest", default=None,
+                    metavar="RIDE_ID",
+                    help="fetch one ride's per-sample details (default: the newest "
+                         "ride that has heart rate) and describe their shape")
     bp.set_defaults(fn=cmd_bosch_probe)
 
     bf = sub.add_parser("bosch-forget", help="delete stored Bosch tokens")
