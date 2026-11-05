@@ -25,7 +25,8 @@ T = dt.datetime(2026, 10, 12, 6, 0, tzinfo=timezone.utc)
 @pytest.fixture
 def ride(pool, user):
     """Record an activity. Minutes, because that is how rides are talked about."""
-    def _ride(source, external_id, *, start_min=0, minutes=40, kcal=None, **extra):
+    def _ride(source, external_id, *, start_min=0, minutes=40, kcal=None,
+              activity_type=None, **extra):
         cols = {"duration_s": minutes * 60, "kcal": kcal, **extra}
         with pool.user_tx(user) as cur:
             cur.execute(
@@ -35,7 +36,8 @@ def ride(pool, user):
                     VALUES (diet.current_user_id(), %s, %s, %s, %s,
                      {','.join(['%s'] * len(cols))})""",
                 (source, external_id, T + dt.timedelta(minutes=start_min),
-                 "ebike_ride" if source == "bosch" else "cycling", *cols.values()))
+                 activity_type or ("ebike_ride" if source == "bosch" else "cycling"),
+                 *cols.values()))
     return _ride
 
 
@@ -45,6 +47,21 @@ def rows(pool, user):
 
 
 class TestWhatCountsAsTheSameOuting:
+    def test_a_ride_never_pairs_with_a_gym_session(self, pool, user, ride):
+        """Temporary: a Bosch session's moving time is laid out from its first
+        start, so it can cover a workout done during a break. Only rides may
+        pair with rides until the session's real riding windows are known."""
+        ride("bosch", "b", start_min=0, minutes=120)
+        ride("garmin", "g", start_min=20, minutes=60, activity_type="indoor_cardio")
+        got = rows(pool, user)
+        assert got["b"]["matched_external_id"] is None
+        assert got["g"]["matched_external_id"] is None
+
+    def test_garmin_cycling_variants_still_pair(self, pool, user, ride):
+        ride("bosch", "b", start_min=1, minutes=39)
+        ride("garmin", "g", start_min=0, minutes=40, activity_type="e_bike_fitness")
+        assert rows(pool, user)["b"]["matched_external_id"] == "g"
+
     def test_a_watch_and_a_bike_recording_one_ride_are_matched(
             self, pool, user, ride):
         """The watch is started by hand, so the two never agree to the second."""

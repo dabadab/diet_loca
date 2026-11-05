@@ -335,6 +335,17 @@ _TWIN_SQL = """
                  - greatest(a.started_at, t.started_at))) AS overlap_s
         FROM diet.activities t
         WHERE t.source <> a.source
+          -- TEMPORARY HACK: only rides pair with rides. A Bosch row is a
+          -- recording session, and its duration (time in motion) is laid out
+          -- as if it ran continuously from the first start, which it does not;
+          -- a long session could cover a gym session that happened during a
+          -- break and be "matched" with it. Type-gating hides that symptom.
+          -- The real fix needs the session's actual riding windows, which
+          -- Bosch does not provide reliably (see ARCHITECTURE, Bosch).
+          AND a.activity_type ~ '(cycl|bik|ebike)'
+          AND a.activity_type !~ 'indoor|virtual'
+          AND t.activity_type ~ '(cycl|bik|ebike)'
+          AND t.activity_type !~ 'indoor|virtual'
           AND a.duration_s IS NOT NULL AND t.duration_s IS NOT NULL
           AND t.started_at < a.started_at + make_interval(secs => a.duration_s)
           AND a.started_at < t.started_at + make_interval(secs => t.duration_s)
