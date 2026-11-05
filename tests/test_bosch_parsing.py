@@ -575,3 +575,14 @@ class TestDetailsShape:
                 return {"activityDetails": "nope"}
         assert bosch.fetch_details(S(), "x") == []
         assert bosch.describe_details([]) == ["no samples returned"]
+
+
+def test_details_report_how_much_of_the_ride_they_cover():
+    """The Flow app can hold one activity whose track and heart rate cover
+    only its last leg, while the distance covers all of it."""
+    samples = [{"distance": d, "heartRate": 100} for d in (2400, 2900, 3376)]
+    text = "\n".join(bosch.describe_details(
+        samples, {"distance": 3376, "startTime": "2026-10-29T18:00:00Z",
+                  "endTime": "2026-10-29T18:20:00Z", "durationWithoutStops": 577}))
+    assert "samples cover distance 2400..3376 m, 29% of the ride's 3376 m" in text
+    assert "samples with heartRate cover distance 2400..3376 m" in text

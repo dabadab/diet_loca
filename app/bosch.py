@@ -602,6 +602,24 @@ def describe_details(samples: list[dict], summary: dict | None = None) -> list[s
                      f"mean {sum(hr) / len(hr):.0f}, max {max(hr)}")
     else:
         lines.append("heartRate: none")
+    def _span(rows: list[dict]) -> tuple[float, float] | None:
+        d = [float(x["distance"]) for x in rows
+             if isinstance(x.get("distance"), (int, float))]
+        return (min(d), max(d)) if d else None
+
+    total = summary.get("distance") if summary else None
+    for label, rows in (("samples", samples),
+                        ("samples with heartRate", [
+                            x for x in samples
+                            if isinstance(x.get("heartRate"), (int, float))])):
+        span = _span(rows)
+        if span is None:
+            continue
+        covered = span[1] - span[0]
+        share = (f", {covered / total:.0%} of the ride's {total} m"
+                 if isinstance(total, (int, float)) and total > 0 else "")
+        lines.append(f"{label} cover distance {span[0]:.0f}..{span[1]:.0f} m"
+                     f"{share}")
     if summary:
         start, end = (parse_utc(summary.get("startTime")),
                       parse_utc(summary.get("endTime")))
