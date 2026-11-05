@@ -31,7 +31,7 @@ import logging
 import os
 import secrets
 import urllib.parse
-from datetime import date as date_cls
+from datetime import date as date_cls, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -71,9 +71,11 @@ CLIENT_ID = os.environ.get("BOSCH_CLIENT_ID") or "one-bike-app"
 REDIRECT_URI = os.environ.get("BOSCH_REDIRECT_URI") or "onebikeapp-ios://"
 # The realm advertises hundreds of scopes, most of them other clients'. Asking
 # for one a client was not given fails the whole login, so a Data Act client
-# starts from the two it certainly needs and BOSCH_SCOPES widens it.
+# asks only for what the ride list needs -- the Activity Records API names
+# activity:summaries:read for it. activity:details:read would add the GPS
+# track, which this app strips anyway. BOSCH_SCOPES overrides.
 SCOPES = (os.environ.get("BOSCH_SCOPES")
-          or ("openid offline_access" if IS_KEYCLOAK
+          or ("openid offline_access activity:summaries:read" if IS_KEYCLOAK
               else "openid profile email offline_access"))
 
 # Two different backends depending on which client you hold. The app's own
@@ -85,9 +87,15 @@ DATA_ACT_HOST = "https://api.bosch-ebike.com"
 API_BASE = (os.environ.get("BOSCH_API_BASE")
             or (DATA_ACT_HOST if os.environ.get("BOSCH_CLIENT_ID")
                 else APP_ACTIVITY_HOST))
-# The path rides are served at. A guess until the portal's own documentation
-# says otherwise, which is why it is a setting rather than a literal.
-ACTIVITY_PATH = os.environ.get("BOSCH_ACTIVITY_PATH") or "/activities"
+# The path rides are served at. The smart-system one comes from community
+# clients that use the Data Act API (eBike System 2 bikes serve
+# /activity/ebike-system-2/v1/activities instead); Bosch's own documentation is
+# behind the portal login, which is why it stays a setting.
+ACTIVITY_PATH = (os.environ.get("BOSCH_ACTIVITY_PATH")
+                 or ("/activity/smart-system/v1/activities" if IS_KEYCLOAK
+                     else "/activities"))
+PAGE_SIZE = 50
+MAX_PAGES = 20
 
 # Refresh this long before the access token actually expires, so a slow request
 # cannot start valid and finish rejected.
@@ -403,48 +411,39 @@ def is_rate_limited(exc: BaseException) -> bool:
 
 # --- rides -----------------------------------------------------------------
 #
-# PROVISIONAL FIELD MAP. Bosch publishes no schema, so each column lists every
-# plausible spelling rather than one guess, and a column that matches nothing
-# lands as NULL instead of a fabricated number. `manage.py bosch-probe` dumps a
-# real payload's numeric keys so this list can be corrected against evidence --
-# that is the first thing to run after a successful login, and until it has been
-# run these names are hypotheses.
+# Field names are from Bosch's Activity Records API (Smart System) v1.4.0
+# OpenAPI document, /activities, which a Data Act client can download from the
+# portal. Units there: distance in metres, speeds in km/h, durations in
+# seconds, rider power in watts.
+
+def _kmh_to_mps(value: Any) -> float:
+    return float(value) / 3.6
+
 
 ACTIVITY_SPECS: tuple[FieldSpec, ...] = (
-    FieldSpec("duration_s", ("duration", "durationSeconds", "totalDuration",
-                             "ridingTime", "movingTime", "statistics.duration"),
+    # "Duration in motion". The elapsed time is endTime - startTime, which
+    # extract_activity fills in because the summary has no field for it.
+    FieldSpec("moving_s", ("durationWithoutStops",), source="bosch"),
+    FieldSpec("distance_m", ("distance",), source="bosch"),
+    # Not confirmed to be rider rather than system calories -- the spec just
+    # says caloriesBurned. Compare against a ride's average rider power once
+    # there is one.
+    FieldSpec("kcal", ("caloriesBurned",), source="bosch"),
+    FieldSpec("avg_rider_power_w", ("riderPower.average",), source="bosch"),
+    FieldSpec("avg_cadence_rpm", ("cadence.average",), source="bosch"),
+    FieldSpec("elevation_gain_m", ("elevation.gain",), source="bosch"),
+    FieldSpec("avg_speed_mps", ("speed.average",), convert=_kmh_to_mps,
               source="bosch"),
-    FieldSpec("moving_s", ("movingDuration", "movingTime",
-                           "statistics.movingTime"), source="bosch"),
-    FieldSpec("distance_m", ("distance", "totalDistance", "distanceMeters",
-                             "statistics.distance"), source="bosch"),
-    # Rider calories, not system calories: what the person burned, which is the
-    # whole reason this connector exists.
-    FieldSpec("kcal", ("calories", "riderCalories", "kcal",
-                       "energy.riderCalories", "statistics.calories"),
-              source="bosch"),
-    FieldSpec("avg_rider_power_w", ("averageRiderPower", "avgRiderPower",
-                                    "riderPower.average", "averagePower",
-                                    "statistics.averageRiderPower"),
-              source="bosch"),
-    FieldSpec("avg_cadence_rpm", ("averageCadence", "avgCadence",
-                                  "cadence.average", "statistics.averageCadence"),
-              source="bosch"),
-    FieldSpec("elevation_gain_m", ("elevationGain", "totalAscent", "ascent",
-                                   "statistics.elevationGain"), source="bosch"),
-    FieldSpec("avg_speed_mps", ("averageSpeed", "avgSpeed", "speed.average",
-                                "statistics.averageSpeed"), source="bosch"),
-    FieldSpec("max_hr", (), source="bosch"),          # the bike has no HR sensor
-    FieldSpec("avg_hr", (), source="bosch"),
+    # Present only when the rider paired a heart-rate strap with the Flow app.
+    FieldSpec("max_hr", ("heartRate.maximum",), source="bosch"),
+    FieldSpec("avg_hr", ("heartRate.average",), source="bosch"),
     FieldSpec("training_effect_aerobic", (), source="bosch"),
     FieldSpec("training_effect_anaerobic", (), source="bosch"),
 )
 
-_ID_PATHS = ("activityId", "id", "rideId", "uuid", "activityUuid")
-_START_PATHS = ("startTime", "startedAt", "startTimeUtc", "start",
-                "beginTime", "startDate")
-_RIDER_ENERGY = ("riderEnergy", "energy.rider", "riderEnergyWh", "riderWh")
-_MOTOR_ENERGY = ("motorEnergy", "energy.motor", "motorEnergyWh", "motorWh")
+_ID_PATHS = ("id",)
+_START_PATHS = ("startTime",)
+_END_PATHS = ("endTime",)
 
 
 def _first(item: dict, paths) -> Any:
@@ -453,33 +452,6 @@ def _first(item: dict, paths) -> Any:
         if value is not None:
             return value
     return None
-
-
-def _motor_share(item: dict) -> float | None:
-    """
-    How much of the ride the motor did, 0-1.
-
-    Reported directly if Bosch offers it; otherwise derived from the two energy
-    figures, which is the form the share is usually published in. Returns None
-    rather than 0 when neither is present -- "the motor did nothing" and "we do
-    not know what the motor did" are not the same claim, and on an ebike the
-    difference is the entire point.
-    """
-    direct = _first(item, ("motorEnergyShare", "motorShare", "assistShare"))
-    if direct is not None:
-        try:
-            share = float(direct)
-        except (TypeError, ValueError):
-            share = None
-        if share is not None:
-            return share / 100 if share > 1 else share
-    rider, motor = _first(item, _RIDER_ENERGY), _first(item, _MOTOR_ENERGY)
-    try:
-        rider, motor = float(rider), float(motor)
-    except (TypeError, ValueError):
-        return None
-    total = rider + motor
-    return motor / total if total > 0 else None
 
 
 def extract_activity(item: Any) -> dict | None:
@@ -506,12 +478,19 @@ def extract_activity(item: Any) -> dict | None:
         # than "cycling" keeps it distinguishable from a Garmin cycling row at a
         # glance, which matters when both are rows for one outing.
         "activity_type": "ebike_ride",
-        "name": _first(item, ("name", "title", "activityName")),
-        "motor_energy_share": _motor_share(item),
+        "name": _first(item, ("title",)),
+        # The summary says nothing about how much the motor did, and NULL is
+        # honest: "the motor did nothing" is a strong claim on an ebike.
+        "motor_energy_share": None,
         "hr_zones": None,
         "raw": strip_location(item),
     }
     row.update(apply_specs(item, ACTIVITY_SPECS))
+    ended_at = parse_utc(_first(item, _END_PATHS))
+    if ended_at is not None and ended_at > started_at:
+        row["duration_s"] = (ended_at - started_at).total_seconds()
+    else:
+        row["duration_s"] = None
     if row.get("name") is not None:
         row["name"] = str(row["name"])[:300]
     return row
@@ -526,9 +505,34 @@ def fetch_activities(session: Session, start: date_cls, end: date_cls,
     being down must not cost the Garmin half of a poll. A rate limit is the
     exception, since the caller needs to back off rather than carry on.
     """
+    items: list = []
     try:
-        payload = session.get(f"{API_BASE}{ACTIVITY_PATH}",
-                              **{"from": start.isoformat(), "to": end.isoformat()})
+        offset = 0
+        while True:
+            payload = session.get(f"{API_BASE}{ACTIVITY_PATH}", limit=PAGE_SIZE,
+                                  offset=offset, sort="-startTime")
+            page = payload if isinstance(payload, list) else (
+                payload.get("activitySummaries") or payload.get("activities")
+                or payload.get("items") or payload.get("content") or []
+            ) if isinstance(payload, dict) else []
+            if not isinstance(page, list):
+                log.warning("bosch: activities returned %s, not a list",
+                            type(page).__name__)
+                break
+            items.extend(page)
+            offset += PAGE_SIZE
+            total = ((payload.get("pagination") or {}).get("total")
+                     if isinstance(payload, dict) else None)
+            starts = [parse_utc(_first(i, _START_PATHS)) for i in page
+                      if isinstance(i, dict)]
+            starts = [t for t in starts if t is not None]
+            # Newest first, and the endpoint takes no date range that anyone has
+            # confirmed, so stop once a page reaches back past the window.
+            if (not page or len(page) < PAGE_SIZE
+                    or (isinstance(total, int) and offset >= total)
+                    or (starts and min(starts).date() < start - timedelta(days=1))
+                    or offset >= PAGE_SIZE * MAX_PAGES):
+                break
     except RateLimited:
         raise
     except NeedsLogin:
@@ -537,13 +541,18 @@ def fetch_activities(session: Session, start: date_cls, end: date_cls,
         log.warning("bosch: activities for %s..%s failed: %s", start, end, exc)
         return []
 
-    items = payload if isinstance(payload, list) else (
-        payload.get("activities") or payload.get("items")
-        or payload.get("content") or []) if isinstance(payload, dict) else []
-    if not isinstance(items, list):
-        log.warning("bosch: activities for %s..%s returned %s, not a list",
-                    start, end, type(items).__name__)
-        return []
+    # Bosch's own ordering has been seen to misbehave, so the window is applied
+    # to what came back rather than trusted to the request. A day of slack each
+    # side, because the caller's dates are the rider's local ones and these
+    # timestamps are UTC.
+    slack = timedelta(days=1)
+
+    def _in_window(item: Any) -> bool:
+        if not isinstance(item, dict):
+            return False
+        t = parse_utc(_first(item, _START_PATHS))
+        return t is None or start - slack <= t.date() <= end + slack
+    items = [i for i in items if _in_window(i)]
 
     if raw_dir is not None:
         try:

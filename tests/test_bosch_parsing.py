@@ -1,15 +1,11 @@
 """
 Parsing Bosch Flow's ride payloads. No database, no network.
 
-Bosch publishes no schema at all, so these tests pin down the behaviour that
-has to hold whatever the field names turn out to be: a value that cannot be
-found yields nothing rather than a guess, a ride that cannot be identified is
-dropped rather than stored half-formed, and no location ever reaches storage.
-
-The field *names* in app/bosch.py are hypotheses until `manage.py bosch-probe`
-has been run against a live account. These tests therefore exercise each
-candidate spelling, so that when the real one is known the others can be removed
-and the suite still says whether anything broke.
+The field names come from Bosch's Activity Records API (Smart System) v1.4.0
+OpenAPI document. What these tests pin down is the behaviour that has to hold
+whatever Bosch sends: a value that cannot be found yields nothing rather than a
+guess, a ride that cannot be identified is dropped rather than stored
+half-formed, and no location ever reaches storage.
 """
 
 import datetime as dt
@@ -20,34 +16,44 @@ import pytest
 from app import bosch
 from app.fieldmap import FieldSpec, dig, parse_utc, strip_location
 
+# The documented example, trimmed, with the location-ish keys the stored
+# payload must never keep added.
 RIDE = {
-    "activityId": "ride-1", "name": "Morning commute",
-    "startTime": "2026-10-12T07:30:00Z",
-    "duration": 2400, "movingDuration": 2280, "distance": 18500,
-    "calories": 310, "averageRiderPower": 112, "averageCadence": 68,
-    "elevationGain": 140, "averageSpeed": 7.7,
-    "riderEnergy": 1300, "motorEnergy": 2600,
-    "startLatitude": 47.4979, "startLongitude": 19.0402,
-    "trackPolyline": "abc", "coordinates": [[1, 2]],
+    "id": "0dbbd57b-3a0e-4ca2-a8f3-7a35d2cfc554",
+    "startTime": "2026-07-21T05:02:36Z", "endTime": "2026-07-21T15:30:25Z",
+    "timeZone": "Europe/Berlin", "durationWithoutStops": 6541,
+    "title": "Kusterdingen round trip", "bikeId": "b", "startOdometer": 1116643,
+    "distance": 37192, "speed": {"average": 21.6, "maximum": 37.34},
+    "cadence": {"average": 61, "maximum": 81},
+    "riderPower": {"average": 108, "maximum": 250},
+    "elevation": {"gain": 242, "loss": 251}, "caloriesBurned": 541,
+    "heartRate": {"average": 125, "maximum": 155},
+    "startLatitude": 48.49, "trackPolyline": "abc", "coordinates": [[1, 2]],
 }
 
 
 class TestIdentity:
     def test_the_fields_that_become_columns(self):
         row = bosch.extract_activity(RIDE)
-        assert row["external_id"] == "ride-1"
-        assert row["started_at"] == dt.datetime(2026, 10, 12, 7, 30, tzinfo=timezone.utc)
+        assert row["external_id"] == RIDE["id"]
+        assert row["started_at"] == dt.datetime(2026, 7, 21, 5, 2, 36, tzinfo=timezone.utc)
         assert row["activity_type"] == "ebike_ride"
-        assert row["name"] == "Morning commute"
-        assert (row["duration_s"], row["moving_s"]) == (2400.0, 2280.0)
-        assert (row["distance_m"], row["kcal"]) == (18500.0, 310.0)
-        assert row["avg_rider_power_w"] == 112.0
-        assert row["avg_cadence_rpm"] == 68.0
+        assert row["name"] == "Kusterdingen round trip"
+        assert row["moving_s"] == 6541.0
+        assert row["duration_s"] == 10 * 3600 + 27 * 60 + 49, "endTime - startTime"
+        assert (row["distance_m"], row["kcal"]) == (37192.0, 541.0)
+        assert row["avg_rider_power_w"] == 108.0
+        assert row["avg_cadence_rpm"] == 61.0
+        assert row["elevation_gain_m"] == 242.0
+
+    def test_speed_is_converted_from_kmh(self):
+        """Bosch reports km/h; the column is metres per second."""
+        assert bosch.extract_activity(RIDE)["avg_speed_mps"] == pytest.approx(6.0)
 
     @pytest.mark.parametrize("missing, item", [
-        ("an id", {"startTime": "2026-10-12T07:30:00Z", "duration": 600}),
-        ("a start time", {"activityId": "x", "duration": 600}),
-        ("an unparseable start", {"activityId": "x", "startTime": "soon"}),
+        ("an id", {"startTime": "2026-10-12T07:30:00Z"}),
+        ("a start time", {"id": "x"}),
+        ("an unparseable start", {"id": "x", "startTime": "soon"}),
         ("anything at all", "not even a dict"),
     ])
     def test_an_unidentifiable_ride_is_skipped(self, missing, item):
@@ -65,45 +71,32 @@ class TestMissingValues:
     def test_a_field_that_matches_nothing_is_null_not_zero(self):
         """The difference matters most for power: a bike with no torque reading
         is not a bike the rider pedalled with no effort."""
-        sparse = {"activityId": "x", "startTime": "2026-10-12T07:30:00Z"}
+        sparse = {"id": "x", "startTime": "2026-10-12T07:30:00Z"}
         row = bosch.extract_activity(sparse)
-        for column in ("duration_s", "distance_m", "kcal", "avg_rider_power_w",
-                       "avg_cadence_rpm", "motor_energy_share"):
+        for column in ("duration_s", "moving_s", "distance_m", "kcal",
+                       "avg_rider_power_w", "avg_cadence_rpm", "avg_hr",
+                       "motor_energy_share"):
             assert row[column] is None, f"{column} should be NULL, not invented"
 
     def test_an_unreadable_value_costs_only_itself(self):
-        junk = dict(RIDE, averageCadence="quite fast")
+        junk = dict(RIDE, cadence={"average": "quite fast", "maximum": 80})
         row = bosch.extract_activity(junk)
         assert row["avg_cadence_rpm"] is None
-        assert row["avg_rider_power_w"] == 112.0, "the rest of the ride stands"
+        assert row["avg_rider_power_w"] == 108.0, "the rest of the ride stands"
 
-    def test_the_bike_reports_no_heart_rate(self):
-        """It has no such sensor, so these must stay NULL rather than borrow a
-        number from somewhere plausible-looking."""
-        row = bosch.extract_activity(dict(RIDE, averageHR=142, maxHR=170))
-        assert row["avg_hr"] is None and row["max_hr"] is None
+    def test_heart_rate_is_taken_when_a_strap_was_paired(self):
+        row = bosch.extract_activity(RIDE)
+        assert (row["avg_hr"], row["max_hr"]) == (125.0, 155.0)
         assert row["hr_zones"] is None
 
+    def test_a_ride_ending_before_it_started_has_no_duration(self):
+        row = bosch.extract_activity(dict(RIDE, endTime="2026-07-21T04:00:00Z"))
+        assert row["duration_s"] is None
 
-class TestMotorShare:
-    def test_derived_from_the_two_energy_figures(self):
-        assert bosch.extract_activity(RIDE)["motor_energy_share"] == \
-            pytest.approx(2600 / 3900)
-
-    def test_a_direct_percentage_is_normalised(self):
-        row = bosch.extract_activity(dict(RIDE, motorEnergyShare=67))
-        assert row["motor_energy_share"] == pytest.approx(0.67)
-
-    def test_a_direct_fraction_is_left_alone(self):
-        row = bosch.extract_activity(dict(RIDE, motorShare=0.67))
-        assert row["motor_energy_share"] == pytest.approx(0.67)
-
-    def test_unknown_is_none_not_zero(self):
+    def test_the_motor_share_is_not_in_the_summary(self):
         """"The motor did nothing" is a claim about an ebike ride, and quite a
         strong one. Not knowing is not the same as knowing it was zero."""
-        bare = {k: v for k, v in RIDE.items()
-                if k not in ("riderEnergy", "motorEnergy")}
-        assert bosch.extract_activity(bare)["motor_energy_share"] is None
+        assert bosch.extract_activity(RIDE)["motor_energy_share"] is None
 
 
 def test_no_location_reaches_the_stored_payload():
@@ -111,7 +104,7 @@ def test_no_location_reaches_the_stored_payload():
     location trace and has no bearing on diet."""
     raw = bosch.extract_activity(RIDE)["raw"]
     assert raw, "the rest of the ride should still be kept"
-    assert raw["calories"] == 310
+    assert raw["caloriesBurned"] == 541
     for key in raw:
         assert not any(h in key for h in ("atitude", "ongitude", "olyline",
                                           "coordinate", "geo")), key
@@ -481,7 +474,7 @@ class TestDataActClientsUseBoschsOwnLogin:
             assert url.startswith("https://p9.authz.bosch.com/auth/realms/obc/"
                                   "protocol/openid-connect/auth?")
             assert mod.TOKEN_URL.endswith("/protocol/openid-connect/token")
-            assert "scope=openid+offline_access" in url
+            assert "scope=openid+offline_access+activity%3Asummaries%3Aread" in url
         finally:
             monkeypatch.undo()
             import importlib
@@ -505,3 +498,39 @@ class TestDataActClientsUseBoschsOwnLogin:
             monkeypatch.undo()
             import importlib
             importlib.reload(bosch)
+
+
+class TestFetchPagesThroughTheWindow:
+    """The ride list is newest-first and paged; the window is applied to what
+    comes back rather than trusted to a date filter nobody has confirmed."""
+
+    class FakeSession:
+        def __init__(self, rides):
+            self.rides, self.calls = rides, []
+
+        def get(self, url, **params):
+            self.calls.append(params)
+            off, lim = params["offset"], params["limit"]
+            return {"activitySummaries": self.rides[off:off + lim],
+                    "pagination": {"total": len(self.rides)}}
+
+    @staticmethod
+    def _ride(n, day):
+        return {"id": f"r{n}", "startTime": f"{day}T08:00:00Z", "distance": 1000}
+
+    def test_it_pages_until_a_page_reaches_back_past_the_window(self):
+        from datetime import date
+        rides = [self._ride(i, f"2026-10-{30 - i:02d}") for i in range(30)]
+        fake = self.FakeSession(rides)
+        got = bosch.fetch_activities(fake, date(2026, 10, 20), date(2026, 11, 5))
+        # r0..r10 are 30..20 Oct; r11 (19 Oct) is the day of slack for local
+        # dates against UTC timestamps; r12 is out.
+        assert {r["id"] for r in got} == {f"r{i}" for i in range(12)}
+        assert fake.calls[0]["sort"] == "-startTime"
+
+    def test_it_fetches_the_second_page_when_the_first_is_all_in_window(self):
+        from datetime import date
+        rides = [self._ride(i, "2026-10-29") for i in range(60)]
+        fake = self.FakeSession(rides)
+        got = bosch.fetch_activities(fake, date(2026, 10, 1), date(2026, 11, 5))
+        assert len(got) == 60 and len(fake.calls) == 2

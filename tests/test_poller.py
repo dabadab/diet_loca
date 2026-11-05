@@ -237,11 +237,13 @@ class TestSyncState:
 
 # ----------------------------------------------------------------- bosch ---
 
+_YESTERDAY = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)).date()
 BOSCH_RIDE = {
-    "activityId": "ride-1", "name": "Commute",
-    "startTime": "2026-10-12T07:30:00Z", "duration": 2400, "distance": 18500,
-    "calories": 310, "averageRiderPower": 112, "averageCadence": 68,
-    "riderEnergy": 1300, "motorEnergy": 2600,
+    "id": "ride-1", "title": "Commute",
+    "startTime": f"{_YESTERDAY}T07:30:00Z", "endTime": f"{_YESTERDAY}T08:10:00Z",
+    "durationWithoutStops": 2280, "distance": 18500,
+    "caloriesBurned": 310, "riderPower": {"average": 112, "maximum": 250},
+    "cadence": {"average": 68, "maximum": 80},
 }
 
 
@@ -257,7 +259,8 @@ class FakeSession:
         self.calls.append((url, params))
         if self.fail:
             raise self.fail
-        return {"activities": self.rides}
+        return {"activitySummaries": self.rides,
+                "pagination": {"total": len(self.rides)}}
 
 
 @pytest.fixture
@@ -294,7 +297,7 @@ class TestBoschRides:
         assert row["source"] == "bosch" and row["activity_type"] == "ebike_ride"
         assert float(row["kcal"]) == 310.0
         assert float(row["avg_rider_power_w"]) == 112.0
-        assert float(row["motor_energy_share"]) == pytest.approx(2600 / 3900, abs=1e-3)
+        assert row["motor_energy_share"] is None, "the summary does not say"
 
     def test_the_window_is_asked_for_once(self, bosch_account, fake_bosch):
         api = fake_bosch(FakeSession())
@@ -302,14 +305,13 @@ class TestBoschRides:
         assert len(api.calls) == 1, "one request for the whole window"
         _, params = api.calls[0]
         today = dt.datetime.now(ZoneInfo(bosch_account["timezone"])).date()
-        assert params["from"] == (today - dt.timedelta(days=6)).isoformat()
-        assert params["to"] == today.isoformat()
+        assert params == {"limit": 50, "offset": 0, "sort": "-startTime"}
 
     def test_a_re_fetched_ride_updates_rather_than_duplicates(
             self, bosch_account, fake_bosch, pool):
         fake_bosch(FakeSession())
         poller.poll_bosch(bosch_account, 7, None)
-        fake_bosch(FakeSession([dict(BOSCH_RIDE, calories=333)]))
+        fake_bosch(FakeSession([dict(BOSCH_RIDE, caloriesBurned=333)]))
         poller.poll_bosch(bosch_account, 7, None)
         with pool.user_tx(bosch_account["user_id"]) as cur:
             got = cur.execute("SELECT kcal FROM diet.activities").fetchall()

@@ -514,7 +514,7 @@ a mismatched redirect identically and cannot say which it hit.
 a browser. Cheap checks before expensive ones — the lesson `garmin-login` learnt
 by discovering an unreadable key after spending an MFA code.
 
-The field map stays defensive and provisional: `manage.py bosch-probe` dumps a
+The field map follows the Activity Records API v1.4.0 OpenAPI document and stays defensive: `manage.py bosch-probe` dumps a
 real payload's keys so `ACTIVITY_SPECS` can be corrected against evidence, and
 `--path` issues a raw request so the ride endpoint can be found from the
 portal's documentation rather than guessed at.
