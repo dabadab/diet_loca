@@ -467,9 +467,10 @@ def cmd_bosch_probe(args) -> None:
         # ride endpoint cannot be known from here. This is how it gets found:
         # try what the portal's documentation says and look at what comes back.
         import json as _json
-        payload = session.get(bosch.API_BASE + args.path,
-                              **{"from": (today - timedelta(days=args.days)).isoformat(),
-                                 "to": today.isoformat()})
+        # The ride list takes limit/offset/sort and nothing date-shaped, so a
+        # from/to here would only be an unknown parameter for Bosch to object to.
+        payload = session.get(bosch.API_BASE + args.path, limit=5,
+                              sort="-startTime")
         print(_json.dumps(payload, indent=2, default=str)[:4000])
         return
     lines = bosch.probe(session, today - timedelta(days=args.days), today)
