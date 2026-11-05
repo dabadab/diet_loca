@@ -70,12 +70,14 @@ else:
 CLIENT_ID = os.environ.get("BOSCH_CLIENT_ID") or "one-bike-app"
 REDIRECT_URI = os.environ.get("BOSCH_REDIRECT_URI") or "onebikeapp-ios://"
 # The realm advertises hundreds of scopes, most of them other clients'. Asking
-# for one a client was not given fails the whole login, so a Data Act client
-# asks only for what the ride list needs -- the Activity Records API names
-# activity:summaries:read for it. activity:details:read would add the GPS
-# track, which this app strips anyway. BOSCH_SCOPES overrides.
+# for one this client was not given fails the whole login with invalid_scope,
+# and a client registered at the Data Act portal is not offered
+# activity:summaries:read even though the Activity Records spec names it --
+# the portal's own sign-in refuses it. Community clients read rides with a
+# bare `openid` token, so the access is evidently granted by the rider's data
+# sharing consent instead. BOSCH_SCOPES overrides.
 SCOPES = (os.environ.get("BOSCH_SCOPES")
-          or ("openid offline_access activity:summaries:read" if IS_KEYCLOAK
+          or ("openid offline_access" if IS_KEYCLOAK
               else "openid profile email offline_access"))
 
 # Two different backends depending on which client you hold. The app's own

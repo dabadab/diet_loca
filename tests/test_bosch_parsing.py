@@ -474,7 +474,7 @@ class TestDataActClientsUseBoschsOwnLogin:
             assert url.startswith("https://p9.authz.bosch.com/auth/realms/obc/"
                                   "protocol/openid-connect/auth?")
             assert mod.TOKEN_URL.endswith("/protocol/openid-connect/token")
-            assert "scope=openid+offline_access+activity%3Asummaries%3Aread" in url
+            assert "scope=openid+offline_access" in url
         finally:
             monkeypatch.undo()
             import importlib
