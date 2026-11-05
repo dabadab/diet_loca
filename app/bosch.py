@@ -423,8 +423,12 @@ def _kmh_to_mps(value: Any) -> float:
 
 
 ACTIVITY_SPECS: tuple[FieldSpec, ...] = (
-    # "Duration in motion". The elapsed time is endTime - startTime, which
-    # extract_activity fills in because the summary has no field for it.
+    # "Duration in motion". Both columns, deliberately: endTime - startTime is
+    # not a ride's length. The Flow app keeps recording through stops (a lunch,
+    # an overnight), so elapsed times of 10-23 hours turn up, and as duration_s
+    # they made every such ride "overlap" an evening gym session and get paired
+    # with it as one outing seen twice.
+    FieldSpec("duration_s", ("durationWithoutStops",), source="bosch"),
     FieldSpec("moving_s", ("durationWithoutStops",), source="bosch"),
     FieldSpec("distance_m", ("distance",), source="bosch"),
     # Deliberately not read. caloriesBurned is in the payload, but the decision
@@ -447,7 +451,6 @@ ACTIVITY_SPECS: tuple[FieldSpec, ...] = (
 
 _ID_PATHS = ("id",)
 _START_PATHS = ("startTime",)
-_END_PATHS = ("endTime",)
 
 
 def _first(item: dict, paths) -> Any:
@@ -490,11 +493,6 @@ def extract_activity(item: Any) -> dict | None:
         "raw": strip_location(item),
     }
     row.update(apply_specs(item, ACTIVITY_SPECS))
-    ended_at = parse_utc(_first(item, _END_PATHS))
-    if ended_at is not None and ended_at > started_at:
-        row["duration_s"] = (ended_at - started_at).total_seconds()
-    else:
-        row["duration_s"] = None
     if row.get("name") is not None:
         row["name"] = str(row["name"])[:300]
     return row

@@ -40,7 +40,7 @@ class TestIdentity:
         assert row["activity_type"] == "ebike_ride"
         assert row["name"] == "Kusterdingen round trip"
         assert row["moving_s"] == 6541.0
-        assert row["duration_s"] == 10 * 3600 + 27 * 60 + 49, "endTime - startTime"
+        assert row["duration_s"] == 6541.0, "not endTime - startTime, see below"
         assert row["distance_m"] == 37192.0
         assert row["avg_rider_power_w"] == 108.0
         assert row["avg_cadence_rpm"] == 61.0
@@ -96,9 +96,13 @@ class TestMissingValues:
         assert (row["avg_hr"], row["max_hr"]) == (125.0, 155.0)
         assert row["hr_zones"] is None
 
-    def test_a_ride_ending_before_it_started_has_no_duration(self):
-        row = bosch.extract_activity(dict(RIDE, endTime="2026-07-21T04:00:00Z"))
-        assert row["duration_s"] is None
+    def test_a_ride_left_recording_does_not_become_a_long_one(self):
+        """The app keeps recording through a stop, so a 40-minute ride can end
+        hours after it started. Taking endTime - startTime as its length made it
+        overlap whatever the watch recorded that evening and pair with it."""
+        row = bosch.extract_activity(dict(RIDE, durationWithoutStops=2400,
+                                          endTime="2026-07-22T04:00:00Z"))
+        assert row["duration_s"] == 2400.0
 
     def test_the_motor_share_is_not_in_the_summary(self):
         """"The motor did nothing" is a claim about an ebike ride, and quite a
