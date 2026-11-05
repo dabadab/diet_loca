@@ -140,9 +140,10 @@ effect, so switching from maintenance to a cut starts the scoring over instead
 of blending the two. Days before it stay in the day list with their own figures,
 dimmed, like any other day that is not counted.
 
-Ebike rides come from **Bosch Flow** as well, where the motor measures the
-rider's own pedal torque — so its calories are measured rather than guessed from
-heart rate, which overstates an assisted ride.
+Ebike rides come from **Bosch Flow** as well: distance, speed, elevation,
+cadence and rider power from the motor's pedal torque, plus heart rate when a
+watch broadcasts it to the bike. Energy expenditure stays the watch's daily
+figure, inaccuracies and all; Bosch's own calorie number is not stored.
 
 Bosch publishes no API, and the Flow app's own client id is no longer accepted,
 so this goes through the **EU Data Act**: register a client of your own at
@@ -156,9 +157,9 @@ case — it prints a URL to open, and the sign-in ends on an "unable to connect"
 page whose **address bar** holds the code. Paste that URL back. No devtools, no
 tunnel.
 
-A ride both devices saw appears twice, and `in_expenditure` says which rows the
-day's energy figures already contain — `false` means nothing counted that effort
-at all.
+A ride both devices recorded appears twice, and each row names the other as
+its match. A watch cannot record an activity while it broadcasts heart rate to
+the bike, so rides with only a Bosch row are normal.
 
 The Summary also charts weight over the goal period, with a trend line. Scale
 readings are noisy and arrive with gaps, so the trend fits a line, smooths what

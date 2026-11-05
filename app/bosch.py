@@ -427,10 +427,12 @@ ACTIVITY_SPECS: tuple[FieldSpec, ...] = (
     # extract_activity fills in because the summary has no field for it.
     FieldSpec("moving_s", ("durationWithoutStops",), source="bosch"),
     FieldSpec("distance_m", ("distance",), source="bosch"),
-    # Not confirmed to be rider rather than system calories -- the spec just
-    # says caloriesBurned. Compare against a ride's average rider power once
-    # there is one.
-    FieldSpec("kcal", ("caloriesBurned",), source="bosch"),
+    # Deliberately not read. caloriesBurned is in the payload, but the decision
+    # is to rely on Garmin's daily figure for energy expenditure and live with
+    # its inaccuracies, so Bosch's number is never stored, never compared, and
+    # cannot be mistaken for a second opinion on the day. (It also runs low
+    # against the mechanical work, so it was not trustworthy anyway.)
+    FieldSpec("kcal", (), source="bosch"),
     FieldSpec("avg_rider_power_w", ("riderPower.average",), source="bosch"),
     FieldSpec("avg_cadence_rpm", ("cadence.average",), source="bosch"),
     FieldSpec("elevation_gain_m", ("elevation.gain",), source="bosch"),

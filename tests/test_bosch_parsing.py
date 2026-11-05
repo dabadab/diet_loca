@@ -41,10 +41,17 @@ class TestIdentity:
         assert row["name"] == "Kusterdingen round trip"
         assert row["moving_s"] == 6541.0
         assert row["duration_s"] == 10 * 3600 + 27 * 60 + 49, "endTime - startTime"
-        assert (row["distance_m"], row["kcal"]) == (37192.0, 541.0)
+        assert row["distance_m"] == 37192.0
         assert row["avg_rider_power_w"] == 108.0
         assert row["avg_cadence_rpm"] == 61.0
         assert row["elevation_gain_m"] == 242.0
+
+    def test_bosch_calories_are_never_stored(self):
+        """Expenditure is Garmin's daily figure, taken as it is. Bosch's
+        caloriesBurned stays in `raw` for anyone curious, and nowhere else."""
+        row = bosch.extract_activity(RIDE)
+        assert row["kcal"] is None
+        assert row["raw"]["caloriesBurned"] == 541
 
     def test_speed_is_converted_from_kmh(self):
         """Bosch reports km/h; the column is metres per second."""

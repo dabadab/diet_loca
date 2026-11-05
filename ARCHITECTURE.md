@@ -457,13 +457,15 @@ primary UI.
 
 ## Bosch Flow ebike rides
 
-A second connector, because for an ebike Garmin is the wrong instrument twice
-over: when the watch is not worn the ride is invisible, and when it is, its
-calorie figure comes from heart rate — which overstates an assisted ride,
-because the motor is doing part of the work and the heart rate does not know it.
-Bosch measures the pedal torque, so its rider power and calories are **measured,
-not inferred**. That is the whole reason for the connector; the distance and the
-GPS track were already available.
+A second connector, for what Garmin cannot see of an ebike: the distance, speed,
+cadence and the rider's own pedal power, which the motor measures from torque,
+and heart rate when the watch broadcasts it to the bike.
+
+**Energy expenditure is deliberately not Bosch's.** The decision is to rely on
+Garmin's daily figure and live with its inaccuracies, so Bosch's `caloriesBurned`
+is never written to `kcal` (it stays in `raw`). The watch cannot record an
+activity while it broadcasts heart rate to the bike, so most rides have a Bosch
+row and no Garmin one, and that is normal rather than a gap to be flagged.
 
 There is no public Bosch API, and the obvious route died on first contact. The
 Flow app's own public client, `one-bike-app`, is no longer recognised by
@@ -525,14 +527,10 @@ new dependency: this is OIDC and JSON.
 
 ### One outing, two rows
 
-A ride recorded by both appears twice, with two calorie figures that will not
-agree. Which of them the day's energy already contains is the thing a reader
-cannot work out from the rows, so it is resolved and reported as
-`in_expenditure`:
-
-- `true` — the watch recorded it, so the day's `active_kcal` already covers it.
-- `false` — only the bike saw it, so **no expenditure figure contains that
-  effort at all**.
+A ride recorded by both appears twice. Each row names the other
+(`matched_source`, `matched_external_id`), so a reader reports one ride rather
+than two. There is no flag for which row the day's energy contains: it is the
+watch's daily total for every ride, recorded or not.
 
 Matching is **resolved at read time, never stamped at write time**. The two
 connectors poll on different cadences, so the Garmin twin routinely arrives
@@ -540,22 +538,18 @@ after the Bosch ride; a match written once would be wrong forever for every ride
 Bosch saw first. A lateral join has no stored state to go stale, and a test
 covers exactly that ordering.
 
-Two details that look fussy and are not. The overlap must exceed **60% of the
+One detail that looks fussy and is not: the overlap must exceed **60% of the
 shorter ride**, not merely be non-zero — a ride that ends as a run begins shares
-several minutes and is two activities, not one seen twice. And the flag is
-`coalesce`d, because `a.source = 'garmin' OR twin.source = 'garmin'` is
-`FALSE OR NULL` for an unmatched Bosch ride, and a flag whose entire job is to
-separate two cases must never answer "neither".
+several minutes and is two activities, not one seen twice.
 
 ### What it deliberately does not do
 
 It does not let a Bosch ride change the energy view. `_DAYS_SQL` not referencing
 `diet.activities` is the invariant that stops activity calories being
 double-counted into expenditure, and it still holds with Bosch rows present —
-`test_the_energy_view_still_ignores_activities_entirely` asserts it. An
-unmatched ride is therefore *surfaced, not counted*: the data says plainly that
-nothing covers it, and turning that into a contribution is its own decision
-rather than a side effect of an ingest feature.
+`test_the_energy_view_still_ignores_activities_entirely` asserts it.
+Bosch rides are therefore *surfaced, not counted*, and they carry no calories
+to count.
 
 ### Evolving the schema, twice learned
 

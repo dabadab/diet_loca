@@ -295,7 +295,7 @@ class TestBoschRides:
                 "SELECT source, activity_type, kcal, avg_rider_power_w, "
                 "motor_energy_share FROM diet.activities").fetchone()
         assert row["source"] == "bosch" and row["activity_type"] == "ebike_ride"
-        assert float(row["kcal"]) == 310.0
+        assert row["kcal"] is None, "Bosch calories are deliberately not stored"
         assert float(row["avg_rider_power_w"]) == 112.0
         assert row["motor_energy_share"] is None, "the summary does not say"
 
@@ -311,11 +311,11 @@ class TestBoschRides:
             self, bosch_account, fake_bosch, pool):
         fake_bosch(FakeSession())
         poller.poll_bosch(bosch_account, 7, None)
-        fake_bosch(FakeSession([dict(BOSCH_RIDE, caloriesBurned=333)]))
+        fake_bosch(FakeSession([dict(BOSCH_RIDE, distance=19000)]))
         poller.poll_bosch(bosch_account, 7, None)
         with pool.user_tx(bosch_account["user_id"]) as cur:
-            got = cur.execute("SELECT kcal FROM diet.activities").fetchall()
-        assert len(got) == 1 and float(got[0]["kcal"]) == 333.0
+            got = cur.execute("SELECT distance_m FROM diet.activities").fetchall()
+        assert len(got) == 1 and float(got[0]["distance_m"]) == 19000.0
 
     def test_rotated_tokens_are_persisted(self, bosch_account, fake_bosch, pool,
                                           monkeypatch):

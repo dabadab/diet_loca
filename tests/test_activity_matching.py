@@ -1,10 +1,9 @@
 """
 One outing, two instruments.
 
-A ride can be recorded by the watch, by the ebike, or by both. Which of those
-happened decides whether the day's `active_kcal` already contains that effort,
-and that is not something a reader can infer from the rows — so it is resolved
-here and reported as a flag.
+A ride can be recorded by the watch, by the ebike, or by both. When both saw
+it the rows are paired, so a reader reports one ride rather than two. Energy
+expenditure is the watch's daily figure either way: Bosch calories are not used.
 
 The matching is done at read time rather than stamped on write, because the two
 connectors poll on different cadences and the Garmin twin routinely arrives
@@ -110,39 +109,6 @@ class TestWhatCountsAsTheSameOuting:
         ride("garmin", "near", start_min=0, minutes=58)
         ride("garmin", "far", start_min=50, minutes=40)
         assert rows(pool, user)["b"]["matched_external_id"] == "near"
-
-
-class TestInExpenditure:
-    """The flag exists so that "already counted" and "counted nowhere" can be
-    told apart. Anything else it might say would be worse than nothing."""
-
-    def test_a_watch_ride_is_already_in_the_days_expenditure(
-            self, pool, user, ride):
-        ride("garmin", "g", minutes=40, kcal=540)
-        assert rows(pool, user)["g"]["in_expenditure"] is True
-
-    def test_a_matched_bike_ride_is_already_in_it_too(self, pool, user, ride):
-        """Through its twin: active_kcal comes from the watch's daily total."""
-        ride("garmin", "g", start_min=0, minutes=40, kcal=540)
-        ride("bosch", "b", start_min=1, minutes=39, kcal=310)
-        assert rows(pool, user)["b"]["in_expenditure"] is True
-
-    def test_an_unmatched_bike_ride_is_in_no_expenditure_figure(
-            self, pool, user, ride):
-        """The watch was left at home, so the day's active_kcal read a commute
-        as sitting still."""
-        ride("bosch", "b", minutes=30, kcal=240)
-        assert rows(pool, user)["b"]["in_expenditure"] is False
-
-    def test_it_is_never_null(self, pool, user, ride):
-        """`a.source = 'garmin' OR twin.source = 'garmin'` is FALSE OR NULL —
-        which is NULL — for an unmatched Bosch ride. A flag whose whole job is
-        to separate two cases must not answer "neither"."""
-        ride("garmin", "g", start_min=0, minutes=40)
-        ride("bosch", "matched", start_min=1, minutes=39)
-        ride("bosch", "alone", start_min=300, minutes=30)
-        for row in rows(pool, user).values():
-            assert row["in_expenditure"] in (True, False), row["external_id"]
 
 
 class TestBoschColumns:

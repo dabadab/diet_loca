@@ -213,10 +213,9 @@ def get_day(date: str | None = None) -> dict:
     `ignored` means the day has been deliberately left out of the summaries;
     `ignored_reason` says why. Its figures below are still real.
 
-    Activities carry a `source` and an `in_expenditure` flag — one outing may
-    appear twice, once from the watch and once from the ebike, with different
-    calorie figures. See `get_activities` for what that means before reasoning
-    about either number.
+    Activities carry a `source`. Ebike rides come from Bosch and carry no
+    calories at all: energy expenditure is the watch's figure, taken as it is.
+    See `get_activities`.
     """
     user_id, tz = _identity()
     with db.user_tx(user_id) as cur:
@@ -261,26 +260,23 @@ def get_activities(from_date: str | None = None, to_date: str | None = None,
     `source` says which instrument recorded it, and this matters:
 
     - `garmin` — a watch. Its `kcal` is ESTIMATED from heart rate.
-    - `bosch` — the ebike's own motor. Its `kcal` and `avg_rider_power_w` are
-      MEASURED from pedal torque, and it also reports `avg_cadence_rpm` and
-      `motor_energy_share` (0–1, how much of the ride the motor did). It has no
-      heart rate at all; the bike has no such sensor.
+    - `bosch` — the ebike's own motor. It reports `avg_rider_power_w`
+      (measured from pedal torque) and `avg_cadence_rpm`, plus distance, speed
+      and elevation. Its `kcal` is always null on purpose: expenditure is the
+      watch's daily figure, inaccuracies and all, and Bosch's calorie number is
+      not used. `motor_energy_share` is always null too, since Bosch does not
+      say how much the motor did. Heart rate is present only when a watch was
+      broadcasting it to the bike: the watch's reading relayed, not a bike
+      sensor.
 
-    **One ride can appear twice**, once from each. When it does, the two `kcal`
-    figures will not agree, and the Bosch one is the better account of what the
-    rider did: a heart-rate estimate cannot tell how much of the work the motor
-    was doing, so it reads an assisted ride as harder than it was.
-    `matched_source` and `matched_external_id` name the other row when there is
-    one, so you can recognise a pair rather than reporting two rides.
+    A ride the watch also recorded as an activity can appear twice, once from
+    each. `matched_source` and `matched_external_id` name the other row when
+    there is one, so you can recognise a pair rather than reporting two rides.
+    Rides with no Garmin activity are normal: the watch cannot record an
+    activity while it broadcasts heart rate to the bike.
 
-    NEVER add any activity's calories to expenditure. `in_expenditure` says
-    whether the day's `active_kcal` already covers that ride:
-
-    - `true` — the watch recorded it, so it is already in the day's figures.
-    - `false` — nothing recorded it but the bike, so it is in NO expenditure
-      figure. The day's `active_kcal` is missing that effort entirely. Say so if
-      it is relevant; do not silently add it, and do not treat the day's deficit
-      as if it accounted for the ride.
+    NEVER add any activity's calories to expenditure. The day's `active_kcal`
+    is already the figure to use, for every ride, recorded or not.
 
     Dates are YYYY-MM-DD in the user's timezone; the default range is the last
     14 days. `activity_type` is the tracker's own key, such as `running`,

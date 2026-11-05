@@ -358,16 +358,7 @@ _ACTIVITY_SQL = """
            a.hr_zones, a.source,
            a.avg_cadence_rpm, a.avg_rider_power_w, a.motor_energy_share,
            twin.source      AS matched_source,
-           twin.external_id AS matched_external_id,
-           -- The day's active_kcal comes from the watch's own daily total, so a
-           -- ride the watch recorded is already inside it. A ride it did not is
-           -- in no expenditure figure at all -- which is worth saying out loud
-           -- rather than leaving to be worked out from a NULL.
-           -- coalesced, not bare: with no twin the OR is FALSE OR NULL, which
-           -- is NULL, and a flag whose whole job is to separate "already
-           -- counted" from "counted nowhere" must never answer "neither".
-           (a.source = 'garmin'
-            OR coalesce(twin.source, '') = 'garmin') AS in_expenditure
+           twin.external_id AS matched_external_id
     FROM diet.activities a
 """ + _TWIN_SQL
 
