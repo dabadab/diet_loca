@@ -467,6 +467,21 @@ is never written to `kcal` (it stays in `raw`). The watch cannot record an
 activity while it broadcasts heart rate to the bike, so most rides have a Bosch
 row and no Garmin one, and that is normal rather than a gap to be flagged.
 
+**A row is a recording session, not a ride.** The Flow app often keeps one
+activity open across a day's rides, so a "roundtrip" can span 13 hours with 22
+minutes in motion. Distance, moving time and elevation are totals; heart rate,
+power, cadence and speed are Bosch's own averages across the legs; the start
+time is the first leg's. `duration_s` is the time in motion too, not
+`endTime - startTime`: as elapsed time, these sessions overlapped whatever the
+watch recorded that evening and were paired with it.
+
+Splitting sessions into rides was looked at and dropped. `/details` returns
+samples without timestamps, unevenly spaced (5.9 s/sample over elapsed time on
+one ride, 32 s on another), and for some sessions only the last leg: one ride's
+samples start at 2,586 m of 3,376 m. The summary is not limited that way (its
+max heart rate on that ride is 145; the samples' is 122), so the summary is
+what is stored, and `bosch-probe --details` stays as a diagnostic only.
+
 There is no public Bosch API, and the obvious route died on first contact. The
 Flow app's own public client, `one-bike-app`, is no longer recognised by
 SingleKey: it answers with "misconfigured application", and it answers a client

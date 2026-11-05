@@ -145,6 +145,10 @@ cadence and rider power from the motor's pedal torque, plus heart rate when a
 watch broadcasts it to the bike. Energy expenditure stays the watch's daily
 figure, inaccuracies and all; Bosch's own calorie number is not stored.
 
+One Bosch row is one Flow recording session, which often holds several rides:
+its distance and moving time are totals, its averages blend the rides, and its
+start time is the first ride's.
+
 Bosch publishes no API, and the Flow app's own client id is no longer accepted,
 so this goes through the **EU Data Act**: register a client of your own at
 [portal.bosch-ebike.com/data-act](https://portal.bosch-ebike.com/data-act) with

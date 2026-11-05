@@ -269,6 +269,15 @@ def get_activities(from_date: str | None = None, to_date: str | None = None,
       broadcasting it to the bike: the watch's reading relayed, not a bike
       sensor.
 
+      **A Bosch row is a recording session, not necessarily one ride.** The
+      Flow app often keeps one activity open across several rides in a day
+      (a "roundtrip" with hours between legs). Distance, moving time
+      (`duration_s` and `moving_s` are both time in motion) and elevation are
+      totals over all its rides; heart rate, power, cadence and speed are
+      Bosch's averages blended across them; `started_at` is the first ride's
+      start. Do not count Bosch rows as a number of rides, and do not read a
+      long gap between the first start and the next row as idle time.
+
     A ride the watch also recorded as an activity can appear twice, once from
     each. `matched_source` and `matched_external_id` name the other row when
     there is one, so you can recognise a pair rather than reporting two rides.
