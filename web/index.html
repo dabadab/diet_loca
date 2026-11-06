@@ -163,6 +163,10 @@
   .expenditure-row .label.trailing { margin-left: auto; }
   .expenditure-row .figure { font-weight: 600; }
 
+  .balance-line {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.78rem; color: var(--ink-soft);
+  }
+
   .stat-row {
     display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 18px;
   }
@@ -1067,7 +1071,12 @@ function statsBlock(st, compact) {
            ${bar("protein vs target", st.scoredProtein, st.targetProtein, "protein", "g")}
            `
         : `<div class="avg-line">no target set for these days</div>`}
-    ` : ""}`;
+    ` : ""}
+    ${st.bothDays && !compact ? `<div class="balance-line" style="margin-top:12px">
+      total ${st.balance <= 0 ? "deficit" : "surplus"} over ${st.bothDays} day${st.bothDays === 1 ? "" : "s"}
+      with both figures:
+      <span class="${st.balance <= 0 ? "neg" : "pos"}">${n0(Math.abs(st.balance))} kcal</span>
+      </div>` : ""}`;
 }
 
 // Calendar weeks, Monday to Sunday, newest first. Chunking the counted days
