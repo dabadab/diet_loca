@@ -355,6 +355,55 @@ def garmin_diagnostics(cur, timezone: str) -> dict:
     }
 
 
+# What each of the other connectors stores, and where. Table names are fixed
+# here, never taken from input. A Bosch ride is dated by when it started, a
+# weigh-in by when it was taken; both carry a local_date for that.
+_CONNECTOR_DATA = {
+    "bosch":      ("diet.bosch_credentials", "diet.activities"),
+    "fitprofile": ("diet.fitprofile_credentials", "diet.weigh_ins"),
+}
+
+
+def connector_diagnostics(cur, connector: str, timezone: str) -> dict:
+    """
+    The Bosch and Fit Profile equivalent of garmin_diagnostics: is a session
+    stored, is the poller trying, is it succeeding, and what has arrived.
+
+    No per-metric table: each stores one kind of thing (rides, weigh-ins), so
+    the newest one and a count say what there is to say.
+    """
+    cred_table, data_table = _CONNECTOR_DATA[connector]
+    cur.execute(f"SELECT updated_at FROM {cred_table}")
+    cred = cur.fetchone()
+
+    cur.execute("""SELECT last_attempt_at, last_success_at, last_error
+                   FROM diet.sync_state WHERE connector = %s""", (connector,))
+    sync = cur.fetchone()
+
+    cur.execute(f"""
+        SELECT max(local_date)                                          AS newest,
+               count(*)                                                 AS total,
+               count(*) FILTER (WHERE local_date
+                     > (now() AT TIME ZONE %(tz)s::text)::date - 30)    AS last_30_days
+        FROM {data_table} WHERE source = %(src)s
+    """, {"tz": timezone, "src": connector})
+    counts = dict(cur.fetchone())
+
+    def iso(row, key):
+        return row[key].isoformat() if row and row[key] else None
+
+    return {
+        "credential": None if cred is None else {
+            "stored_at": cred["updated_at"].isoformat()},
+        "last_attempt_at": iso(sync, "last_attempt_at"),
+        "last_success_at": iso(sync, "last_success_at"),
+        "last_error": sync["last_error"] if sync else None,
+        "newest": counts["newest"].isoformat() if counts["newest"] else None,
+        "total": counts["total"],
+        "last_30_days": counts["last_30_days"],
+    }
+
+
 # --- targets ---------------------------------------------------------------
 # Effective-dated: a row applies from its date until a later one supersedes it.
 # Everything here resolves by that rule rather than reading a "current" value,

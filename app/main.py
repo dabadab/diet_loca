@@ -216,6 +216,67 @@ def _garmin_verdict(d: dict, stale_after_h: int) -> dict:
             "action": None}
 
 
+# Bosch and Fit Profile, which share a shape. `every_h` is how often the poller
+# should be trying: Bosch only runs on the two-hourly full cycle, Fit Profile on
+# the quarter-hourly one too. `thing` names what arrives, for the sentences.
+CONNECTORS = {
+    "bosch": {"name": "Bosch", "thing": "ride", "every_h": 5,
+              "login": "docker compose exec app python -m app.manage bosch-login <email>"},
+    "fitprofile": {"name": "Fit Profile", "thing": "weigh-in", "every_h": 3,
+                   "login": "docker compose exec app python -m app.manage fitprofile-login <email>"},
+}
+
+
+def _connector_verdict(connector: str, d: dict, stale_after_h: int) -> dict:
+    """
+    _garmin_verdict for the other connectors, in the same order.
+
+    Two differences. Not having one connected is "off", not "down": either is
+    optional, and a banner nagging about a scale nobody owns would teach people
+    to ignore the banner. And an old newest item is not a fault: a week without
+    riding, or without weighing, is a week without riding or weighing.
+    """
+    c = CONNECTORS[connector]
+    now = datetime.now(dt_timezone.utc)
+
+    def age_h(iso: str | None) -> float | None:
+        return None if iso is None else (now - datetime.fromisoformat(iso)).total_seconds() / 3600
+
+    if d["credential"] is None:
+        return {"state": "off", "summary": f"No {c['name']} account is connected.",
+                "action": c["login"]}
+
+    if d["last_attempt_at"] is None:
+        return {"state": "down",
+                "summary": "A session is stored, but the poller has never tried to use it.",
+                "action": "docker compose ps poller  ·  docker compose logs poller"}
+
+    attempt_h, success_h = age_h(d["last_attempt_at"]), age_h(d["last_success_at"])
+    failing = d["last_error"] and (success_h is None or attempt_h < success_h)
+    if failing:
+        return {"state": "down", "summary": f"The last sync attempt failed: {d['last_error'][:200]}",
+                "action": f"If the session has expired: {c['login']}"}
+
+    if success_h is None:
+        return {"state": "down", "summary": "The poller has run but has never succeeded.",
+                "action": "docker compose logs poller"}
+
+    if attempt_h > c["every_h"]:
+        return {"state": "stale",
+                "summary": f"The poller last tried {_ago(datetime.fromisoformat(d['last_attempt_at']))}.",
+                "action": "docker compose ps poller  ·  docker compose logs poller"}
+
+    if success_h > stale_after_h:
+        return {"state": "stale", "summary": "Syncing is running but has not succeeded recently.",
+                "action": "docker compose logs poller"}
+
+    newest = (f"newest {c['thing']} {d['newest']}" if d["newest"]
+              else f"no {c['thing']}s stored yet")
+    return {"state": "ok",
+            "summary": f"Last sync {_ago(datetime.fromisoformat(d['last_success_at']))}; {newest}.",
+            "action": None}
+
+
 def _uptime() -> str:
     secs = int(time.time() - STARTED_AT)
     if secs < 60:
@@ -375,6 +436,54 @@ def garmin_sync(user: auth.User = Depends(current_user)):
             "rejected": rejected, "days": settings.garmin_poll_days}
 
 
+@app.post("/api/{connector}/sync")
+def connector_sync(connector: str, user: auth.User = Depends(current_user)):
+    """
+    Pull from Bosch or Fit Profile now. The same shape as /api/garmin/sync --
+    which, registered first, still answers for Garmin -- and the same claim, so
+    the button and the poller cannot both be talking to the service at once.
+    """
+    if connector not in CONNECTORS:
+        raise HTTPException(404, "unknown_connector")
+    from . import poller, bosch, fitprofile
+    name = CONNECTORS[connector]["name"]
+
+    cred = poller.credential_for(user.user_id, connector)
+    if cred is None:
+        raise HTTPException(400, f"no_{connector}_session")
+    if not poller.claim(user.user_id, connector=connector):
+        raise HTTPException(409, "sync_already_running")
+
+    account = {"user_id": user.user_id, "email": user.email,
+               "timezone": user.timezone, **cred}
+    # These two add the email themselves, unlike poll_user.
+    raw_root = Path(settings.garmin_raw_dir) if settings.garmin_raw_dir else None
+    days = settings.garmin_poll_days
+    try:
+        if connector == "bosch":
+            stored, rejected = poller.poll_bosch(account, days, raw_root)
+            deleted = 0
+        else:
+            stored, deleted, rejected = poller.poll_fitprofile(account, days, raw_root)
+    except poller.RateLimited as exc:
+        message = f"{name} rate-limited this client: {exc}"[:400]
+        poller._try_record(user.user_id, message, connector)
+        raise HTTPException(429, message) from None
+    except (bosch.NeedsLogin, fitprofile.NeedsLogin) as exc:
+        message = (f"{name} session expired; run "
+                   f"`manage.py {connector}-login {user.email}`: {exc}")[:400]
+        poller._try_record(user.user_id, message, connector)
+        raise HTTPException(400, message) from None
+    except Exception as exc:
+        message = f"{type(exc).__name__}: {exc}"[:400]
+        log.exception("manual %s sync failed for %s", connector, user.email)
+        poller._try_record(user.user_id, message, connector)
+        raise HTTPException(502, message) from None
+
+    poller._record(user.user_id, ok=True, error=None, connector=connector)
+    return {"stored": stored, "deleted": deleted, "rejected": rejected, "days": days}
+
+
 @app.get("/api/status")
 def status(user: auth.User = Depends(current_user)):
     """
@@ -397,11 +506,14 @@ def status(user: auth.User = Depends(current_user)):
             version = cur.fetchone()["server_version"].split()[0]
             snap = queries.sync_snapshot(cur)
             garmin_diag = queries.garmin_diagnostics(cur, user.timezone)
+            other_diag = {k: queries.connector_diagnostics(cur, k, user.timezone)
+                          for k in CONNECTORS}
     except psycopg.Error as exc:
         stages.append({"stage": "Database", "state": "down",
                        "detail": str(exc).splitlines()[0][:120], "ms": None})
-        stages.append({"stage": "Garmin sync", "state": "down",
-                       "detail": "unknown, database unreachable", "ms": None})
+        for name in ["Garmin"] + [c["name"] for c in CONNECTORS.values()]:
+            stages.append({"stage": f"{name} sync", "state": "down",
+                           "detail": "unknown, database unreachable", "ms": None})
         stages.append({"stage": "Claude connector", "state": "down",
                        "detail": "unknown, database unreachable", "ms": None})
         return {"checked_at": time.time(), "stages": stages, "diagnostics": None}
@@ -428,6 +540,19 @@ def status(user: auth.User = Depends(current_user)):
         if failing:
             detail += f"; last attempt failed: {garmin['last_error'][:80]}"
         stages.append({"stage": "Garmin sync", "state": state,
+                       "detail": detail, "ms": None})
+
+    verdicts = {k: _connector_verdict(k, other_diag[k], settings.garmin_stale_after_hours)
+                for k in CONNECTORS}
+    for k, c in CONNECTORS.items():
+        d, v = other_diag[k], verdicts[k]
+        if v["state"] == "off":
+            detail = "not connected"
+        else:
+            detail = f"last success {_ago(datetime.fromisoformat(d['last_success_at'])) if d['last_success_at'] else 'never'}"
+            if v["state"] != "ok":
+                detail += f"; {v['summary'][:100]}"
+        stages.append({"stage": f"{c['name']} sync", "state": v["state"],
                        "detail": detail, "ms": None})
 
     # Read from sync_state, which only an actual MCP tool call writes. The
@@ -458,6 +583,10 @@ def status(user: auth.User = Depends(current_user)):
         "diagnostics": {
             "garmin": garmin_diag,
             "garmin_verdict": _garmin_verdict(garmin_diag, settings.garmin_stale_after_hours),
+            # One entry per connector, keyed as the sync endpoints are.
+            "connectors": {k: {**other_diag[k], "verdict": verdicts[k],
+                               "name": CONNECTORS[k]["name"]}
+                           for k in CONNECTORS},
         },
     }
 

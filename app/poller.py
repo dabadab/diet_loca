@@ -200,11 +200,13 @@ def claim(user_id, min_gap_seconds: float = 90.0,
         return cur.fetchone() is not None
 
 
-def credential_for(user_id) -> dict | None:
-    """The account's own stored Garmin session. RLS scopes it; no owner needed."""
+def credential_for(user_id, connector: str = "garmin") -> dict | None:
+    """The account's own stored session for one connector. RLS scopes it; no
+    owner needed."""
+    table = CREDENTIAL_TABLES[connector]          # never interpolated from input
     with db.user_tx(user_id) as cur:
-        cur.execute("""SELECT secret_ciphertext, key_id FROM diet.garmin_credentials
-                       WHERE user_id = diet.current_user_id()""")
+        cur.execute(f"""SELECT secret_ciphertext, key_id FROM {table}
+                        WHERE user_id = diet.current_user_id()""")
         return cur.fetchone()
 
 

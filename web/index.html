@@ -133,6 +133,7 @@
   .status-pill.ok    { color: var(--leaf-dark); border-color: var(--leaf-dark); }
   .status-pill.stale { color: var(--butter); border-color: var(--butter); }
   .status-pill.down  { color: var(--tomato); border-color: var(--tomato); }
+  .status-pill.off   { color: var(--ink-soft); border-color: var(--ink-soft); }
 
   .metric { margin-bottom: 14px; }
   .metric-label {
@@ -278,7 +279,7 @@
   }
   /* Bordered cells rather than a gap-coloured grid: an incomplete last row
      otherwise leaves a filled block where a cell would have been. */
-  /* A failing Garmin sync is not a System-tab detail; it is why the numbers
+  /* A failing sync is not a System-tab detail; it is why the numbers
      on the page are wrong, so it says so wherever you are. */
   .banner {
     display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap;
@@ -1177,47 +1178,74 @@ async function refreshHealth() {
 // Shown on every tab: a sync that is failing is why the numbers are wrong, and
 // finding that out requires visiting a tab you would only visit if you already
 // suspected it.
-function renderBanner() {
-  const box = el("banner");
-  const v = state.status && state.status.diagnostics && state.status.diagnostics.garmin_verdict;
-  if (!v || v.state === "ok") { box.hidden = true; box.innerHTML = ""; return; }
-  box.hidden = false;
-  box.className = `banner ${v.state === "stale" ? "stale" : ""}`;
-  box.innerHTML = `
-    <div class="what">
-      <div class="label">Garmin ${esc(v.state)}</div>
-      <div>${esc(v.summary)}</div>
-      ${v.action ? `<div class="sync-note">${esc(v.action)}</div>` : ""}
-    </div>
-    <button id="bannerSync">Sync now</button>
-    <button id="bannerSystem">Details</button>`;
-  el("bannerSystem").onclick = () => { state.mode = "system"; render(); };
-  wireSync(el("bannerSync"));
+// One banner per connector in trouble. "off" is a connector nobody set up,
+// which is a choice, not a fault.
+function connectorVerdicts() {
+  const diag = state.status && state.status.diagnostics;
+  if (!diag) return [];
+  const out = [];
+  if (diag.garmin_verdict) out.push({ key: "garmin", name: "Garmin", v: diag.garmin_verdict });
+  for (const [key, c] of Object.entries(diag.connectors || {}))
+    out.push({ key, name: c.name, v: c.verdict });
+  return out;
 }
 
-// One implementation, used by the banner and the System card, so the two
+function renderBanner() {
+  const box = el("banner");
+  const bad = connectorVerdicts().filter(({ v }) => v.state !== "ok" && v.state !== "off");
+  if (!bad.length) { box.hidden = true; box.innerHTML = ""; return; }
+  box.hidden = false;
+  box.innerHTML = bad.map(({ key, name, v }) => `
+    <div class="banner ${v.state === "stale" ? "stale" : ""}">
+      <div class="what">
+        <div class="label">${esc(name)} ${esc(v.state)}</div>
+        <div>${esc(v.summary)}</div>
+        ${v.action ? `<div class="sync-note">${esc(v.action)}</div>` : ""}
+      </div>
+      <button data-sync="${esc(key)}">Sync now</button>
+      <button data-details>Details</button>
+    </div>`).join("");
+  box.querySelectorAll("[data-details]").forEach((b) => {
+    b.onclick = () => { state.mode = "system"; render(); };
+  });
+  box.querySelectorAll("[data-sync]").forEach((b) => wireSync(b, null, b.dataset.sync));
+}
+
+// What each connector's sync brings back, and what to call it.
+const SYNC = {
+  garmin: { name: "Garmin", thing: "reading" },
+  bosch: { name: "Bosch", thing: "ride" },
+  fitprofile: { name: "Fit Profile", thing: "weigh-in" },
+};
+
+// One implementation, used by the banner and the System cards, so the
 // buttons cannot drift apart.
-function wireSync(btn, noteEl) {
+function wireSync(btn, noteEl, connector = "garmin") {
   if (!btn) return;
+  const c = SYNC[connector];
   btn.onclick = async () => {
     const note = noteEl || btn.parentElement.querySelector(".sync-note");
     btn.disabled = true;
     const was = btn.textContent;
     btn.textContent = "Syncing…";
-    if (note) note.textContent = "asking Garmin — this takes a few seconds";
+    if (note) note.textContent = `asking ${c.name} — this takes a few seconds`;
     try {
-      const r = await api("/api/garmin/sync", { method: "POST" });
+      const r = await api(`/api/${connector}/sync`, { method: "POST" });
       if (note) note.textContent =
-        `stored ${r.stored} reading${r.stored === 1 ? "" : "s"}`
+        `stored ${r.stored} ${c.thing}${r.stored === 1 ? "" : "s"}`
         + (r.activities ? ` and ${r.activities} activit${r.activities === 1 ? "y" : "ies"}` : "")
+        + (r.deleted ? `, removed ${r.deleted}` : "")
         + ` over ${r.days} days`
         + (r.rejected && r.rejected.length ? `; ${r.rejected.length} rejected` : "");
       await boot();                       // targets, days and health all move
     } catch (err) {
+      // A 400 is either "nothing connected" or "the session expired"; the
+      // server's message says which and what to run.
       if (note) note.textContent =
         err.code === 409 ? "a sync is already running — try again in a moment"
-        : err.code === 429 ? "Garmin rate-limited this IP; wait before retrying"
-        : err.code === 400 ? "no Garmin session stored — connect one first"
+        : err.code === 429 ? `${c.name} rate-limited this server; wait before retrying`
+        : err.code === 400 && connector === "garmin" ? "no Garmin session stored — connect one first"
+        : err.code === 400 && err.message.startsWith("no_") ? `no ${c.name} session stored — connect one first`
         : `sync failed: ${err.message}`;
       btn.disabled = false;
       btn.textContent = was;
@@ -1257,8 +1285,47 @@ function renderSystem() {
       </ul>
     </div>`;
 
-  box.innerHTML = chain + garminCard(data.diagnostics);
+  const others = Object.entries((data.diagnostics && data.diagnostics.connectors) || {});
+  box.innerHTML = chain + garminCard(data.diagnostics)
+    + others.map(([key, c]) => connectorCard(key, c)).join("");
   wireSync(el("cardSync"), el("cardSyncNote"));
+  for (const [key] of others)
+    wireSync(el(`cardSync-${key}`), el(`cardSyncNote-${key}`), key);
+}
+
+// Bosch and Fit Profile. Each stores one kind of thing, so a newest item and a
+// count stand in for Garmin's per-metric table.
+function connectorCard(key, c) {
+  const v = c.verdict, thing = SYNC[key].thing;
+  const fact = (label, value, cls) =>
+    `<div class="fact"><span class="fact-label">${label}</span>
+       <span class="fact-value ${cls || ""}">${value}</span></div>`;
+  const connected = c.credential != null;
+  return `
+    <div class="block-card">
+      <div class="block-title">
+        <h2>${esc(c.name)}</h2>
+        <span class="status-pill ${esc(v.state)}">${esc(v.state === "off" ? "not connected" : v.state)}</span>
+      </div>
+      <p style="margin:0 0 4px">${esc(v.summary)}</p>
+      ${v.action ? `<div class="action">${esc(v.action)}</div>` : ""}
+      ${connected ? `
+      <div class="facts">
+        ${fact("session stored", `yes · ${esc(c.credential.stored_at.slice(0, 10))}`)}
+        ${fact("last attempt", c.last_attempt_at ? esc(ago(c.last_attempt_at)) : "never",
+               c.last_attempt_at ? "" : "bad")}
+        ${fact("last success", c.last_success_at ? esc(ago(c.last_success_at)) : "never",
+               c.last_success_at ? "" : "bad")}
+        ${fact(`newest ${thing}`, c.newest ? esc(c.newest) : "—")}
+        ${fact(`${thing}s, last 30 days`, `${c.last_30_days} of ${c.total}`)}
+      </div>
+      ${c.last_error ? `<div class="action bad" style="margin-top:12px">
+        last error: ${esc(c.last_error)}</div>` : ""}
+      <div class="sync-row">
+        <button id="cardSync-${esc(key)}">Sync now</button>
+        <span class="sync-note" id="cardSyncNote-${esc(key)}"></span>
+      </div>` : ""}
+    </div>`;
 }
 
 // The three ways a Garmin sync fails are indistinguishable from the outside --

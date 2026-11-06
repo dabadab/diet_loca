@@ -99,6 +99,7 @@ address, which is safe but lumps every client behind the proxy together.
 | `POST` | `/api/logout` | revokes the session server-side |
 | `GET` | `/api/me` | the signed-in user |
 | `GET` | `/api/status` | the chain the page draws, every line measured |
+| `POST` | `/api/garmin/sync` | pull from Garmin now (also `bosch`, `fitprofile`) |
 | `GET` | `/api/days?days=7` | per-day intake, expenditure, weight |
 | `POST` | `/mcp` | the MCP server, for Claude — bearer token |
 
@@ -311,6 +312,11 @@ never runs, a poller that runs and fails, or syncs that succeed while Garmin
 returns nothing new — and gives the command for that case. Underneath it lists
 every metric with when it was last seen, so a field that has moved shows up as
 one row falling behind the others.
+
+Bosch and Fit Profile have a card each below Garmin's, with their own **Sync
+now**. Neither is required, so one that was never connected shows as *not
+connected* rather than as a fault, and raises no banner. An old newest ride or
+weigh-in is not treated as a fault either: a week without riding is normal.
 
 If a metric stops arriving, Garmin has moved a field. Raw payloads are archived
 before parsing:

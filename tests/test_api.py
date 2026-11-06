@@ -194,3 +194,41 @@ def test_the_favicon_is_served_from_the_root(client):
     status, headers, _ = client("/favicon.ico")
     assert status == 200
     assert "image" in headers.get("content-type", "")
+
+
+class TestOtherConnectors:
+    """Bosch and Fit Profile on the System tab: optional, so 'not connected' is
+    its own state and not a fault the banner shouts about."""
+
+    def test_unconnected_connectors_are_off_not_down(self, client, signed_in):
+        _, _, body = client("/api/status")
+        conns = body["diagnostics"]["connectors"]
+        assert set(conns) == {"bosch", "fitprofile"}
+        for c in conns.values():
+            assert c["credential"] is None and c["verdict"]["state"] == "off"
+        stages = {s["stage"]: s for s in body["stages"]}
+        assert stages["Bosch sync"]["state"] == "off"
+        assert stages["Fit Profile sync"]["detail"] == "not connected"
+
+    def test_a_failing_sync_is_down_and_names_the_error(self, client, signed_in, pool):
+        with pool.user_tx(signed_in) as cur:
+            cur.execute("""INSERT INTO diet.fitprofile_credentials
+                           (user_id, secret_ciphertext, key_id)
+                           VALUES (diet.current_user_id(), 'x', 'k')""")
+            cur.execute("""INSERT INTO diet.sync_state
+                           (user_id, connector, last_attempt_at, last_success_at, last_error)
+                           VALUES (diet.current_user_id(), 'fitprofile', now(),
+                                   now() - interval '1 day', 'sign-in failed')""")
+        _, _, body = client("/api/status")
+        fp = body["diagnostics"]["connectors"]["fitprofile"]
+        assert fp["verdict"]["state"] == "down"
+        assert "sign-in failed" in fp["verdict"]["summary"]
+        assert body["diagnostics"]["connectors"]["bosch"]["verdict"]["state"] == "off"
+
+    def test_syncing_without_a_session_says_so(self, client, signed_in):
+        status, _, body = client("/api/bosch/sync", method="POST")
+        assert status == 400 and body["error"] == "no_bosch_session"
+
+    def test_an_unknown_connector_is_not_found(self, client, signed_in):
+        status, _, _ = client("/api/strava/sync", method="POST")
+        assert status == 404

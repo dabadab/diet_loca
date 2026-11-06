@@ -447,3 +447,32 @@ class TestWeeks:
         weeks = self._weeks(dates)
         assert [w["monday"] for w in weeks] == ["2026-09-21", "2026-09-14"]
         assert [len(w["days"]) for w in weeks] == [7, 6]
+
+
+class TestConnectorCards:
+    """The Bosch and Fit Profile cards on the System tab."""
+
+    def _card(self, key, **over):
+        c = {"name": "Fit Profile", "credential": {"stored_at": "2026-11-06T10:00:00+00:00"},
+             "last_attempt_at": "2026-11-06T10:00:00+00:00",
+             "last_success_at": "2026-11-06T10:00:00+00:00", "last_error": None,
+             "newest": "2026-11-06", "total": 40, "last_30_days": 25,
+             "verdict": {"state": "ok", "summary": "Last sync just now.", "action": None}}
+        return page({"days": []}, {"h": ["connectorCard", key, {**c, **over}]})["h"]
+
+    def test_a_connected_card_shows_its_facts_and_a_sync_button(self):
+        html = self._card("fitprofile")
+        assert "newest weigh-in" in html and "25 of 40" in html
+        assert 'id="cardSync-fitprofile"' in html
+
+    def test_an_unconnected_card_says_how_to_connect_and_offers_no_sync(self):
+        html = self._card("bosch", name="Bosch", credential=None,
+                          verdict={"state": "off", "summary": "No Bosch account is connected.",
+                                   "action": "manage bosch-login"})
+        assert "not connected" in html and "bosch-login" in html
+        assert "cardSync" not in html
+
+    def test_an_error_is_shown(self):
+        html = self._card("bosch", name="Bosch", last_error="Bosch session expired",
+                          verdict={"state": "down", "summary": "failed", "action": None})
+        assert "last error: Bosch session expired" in html

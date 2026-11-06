@@ -31,20 +31,25 @@ function fnSource(name) {
 const helpers = src.split("\n").filter((l) =>
   /^const (esc|n0|n1|W_TREND|W_DOT|W_BOX|TREND_TAU_DAYS) = /.test(l)
   || l.startsWith('  (c) => ({ "&"')).join("\n");
+// Multi-line const tables, taken whole up to their closing brace.
+const tables = ["SYNC"].map((name) => {
+  const start = src.indexOf(`const ${name} = {`);
+  return src.slice(start, src.indexOf("\n};", start) + 3);
+}).join("\n");
 
 const WANTED = ["uncountedKind", "uncountedReason", "uncountedSummary",
                 "passiveAverage", "outFor", "partialNote", "statsFor", "stat",
                 "avgRow", "bar", "statsBlock", "dayListCard", "renderRollup",
                 "weightSeries", "weightFit", "smoothWeight", "weightRate", "weightGeometry",
                 "chartWidth", "wireWeightChart",
-                "weightChart", "shortDate", "calendarWeeks"];
+                "weightChart", "shortDate", "calendarWeeks", "connectorCard", "ago"];
 
 globalThis.state = input.state;
 // Enough of an element for the render functions to write into. querySelector
 // returns null so the hover wiring bows out the way it does for a chart that
 // was not drawn -- node has no layout, so there is nothing to attach to.
 globalThis.el = () => ({ innerHTML: "", querySelector: () => null });
-eval(helpers + "\n" + WANTED.map(fnSource).join("\n"));
+eval(helpers + "\n" + tables + "\n" + WANTED.map(fnSource).join("\n"));
 
 const api = Object.fromEntries(WANTED.map((n) => [n, eval(n)]));
 const out = {};
