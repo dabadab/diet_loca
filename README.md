@@ -168,8 +168,9 @@ the bike, so rides with only a Bosch row are normal.
 Weigh-ins come from the **GE body-composition scale** through its **Fit
 Profile** app's cloud: every weigh-in, with body fat, muscle, water, visceral
 fat, bone, BMR and metabolic age, and the full payload (per-limb figures
-included) kept alongside. Run `manage.py fitprofile-login <email>` once with the
-Fit Profile account's email and password, then `python -m app.poller --only
+included) kept alongside. Run `manage.py fitprofile-login <email>` once; it asks
+for the Fit Profile password (add `--fitprofile-email` if that account uses a
+different address), then `python -m app.poller --only
 fitprofile --days 60` to backfill. The password is stored, encrypted like the
 other connectors' secrets, because the app's sign-in lasts 180 days and has no
 refresh token. `manage.py fitprofile-probe <email>` lists what the account

@@ -536,8 +536,10 @@ def cmd_fitprofile_login(args) -> None:
     if row is None:
         sys.exit(f"no such user: {args.email}")
 
-    fp_email = args.fitprofile_email or input("Fit Profile account email: ").strip()
-    password = getpass.getpass("Fit Profile password: ")
+    # Usually the same address as the diet-log account, so that is the default
+    # rather than a question; --fitprofile-email covers the case where it isn't.
+    fp_email = args.fitprofile_email or args.email
+    password = getpass.getpass(f"Fit Profile password for {fp_email}: ")
     try:
         blob = fitprofile.sign_in(fp_email, password)
     except fitprofile.FitProfileError as exc:
@@ -736,7 +738,8 @@ def main() -> None:
                         help="store an encrypted Fit Profile (GE scale) account")
     fl.add_argument("email", help="the diet-log account these weigh-ins belong to")
     fl.add_argument("--fitprofile-email", default=None,
-                    help="the Fit Profile account email, if different; prompted otherwise")
+                    help="the Fit Profile account email, if it differs from the "
+                         "diet-log one")
     fl.set_defaults(fn=cmd_fitprofile_login)
 
     fpp = sub.add_parser("fitprofile-probe",
