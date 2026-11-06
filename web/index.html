@@ -1118,14 +1118,19 @@ function renderRollup() {
         : "Nothing recorded yet."}</div></div>`;
     return;
   }
-  const weekCards = calendarWeeks(recorded).map(({ monday, sunday, days: week }) => {
+  // Numbered by calendar position from the first week, so a week with nothing
+  // counted leaves a gap in the numbers instead of renumbering the rest.
+  const weeks = calendarWeeks(recorded);
+  const firstMonday = weeks.length ? Date.parse(weeks[weeks.length - 1].monday + "T00:00:00Z") : 0;
+  const weekNo = (monday) => Math.round((Date.parse(monday + "T00:00:00Z") - firstMonday) / (7 * 86400000)) + 1;
+  const weekCards = weeks.map(({ monday, sunday, days: week }) => {
     const st = statsFor(week);
     const weights = week.filter((d) => d.weight_kg != null);
     return `
       <div class="block-card">
         <div class="block-title">
-          <h2>${shortDate(monday)} – ${shortDate(sunday)}</h2>
-          <span class="sub">${monday} – ${sunday} · ${st.n} day${st.n === 1 ? "" : "s"} counted</span>
+          <h2>Week ${weekNo(monday)} (${shortDate(monday)} – ${shortDate(sunday)})</h2>
+          <span class="sub">${st.n} day${st.n === 1 ? "" : "s"} counted</span>
         </div>
         ${statsBlock(st)}
         ${weights.length >= 2 ? `<div class="avg-line" style="margin-top:8px">
