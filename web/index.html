@@ -163,13 +163,6 @@
   .expenditure-row .label.trailing { margin-left: auto; }
   .expenditure-row .figure { font-weight: 600; }
 
-  .balance-line {
-    font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.78rem; color: var(--ink-soft);
-  }
-  .balance-line .value { color: var(--ink); font-weight: 600; }
-  .balance-line .deficit { color: var(--leaf-dark); font-weight: 600; }
-  .balance-line .surplus { color: var(--tomato); font-weight: 600; }
-
   .stat-row {
     display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 18px;
   }
@@ -1032,18 +1025,20 @@ function statsFor(list) {
   };
 }
 
+// days null: the card already says how many days it covers, so the note only
+// speaks up when there is nothing to show.
 function stat(label, value, unit, days, cls) {
-  const days_ = `over ${days} day${days === 1 ? "" : "s"}`;
+  const days_ = days == null ? "" : `over ${days} day${days === 1 ? "" : "s"}`;
   return `
     <div class="stat">
       <div class="stat-label">${label}</div>
       <div class="stat-value ${cls || ""}">${value == null ? "—" : (unit === "g" ? n1(value) : n0(value))}
         <span class="stat-unit">${value == null ? "" : unit}</span></div>
-      <div class="stat-note">${value == null ? "no data" : days_}</div>
+      ${value == null || days_ ? `<div class="stat-note">${value == null ? "no data" : days_}</div>` : ""}
     </div>`;
 }
 
-function avgRow(st) {
+function avgRow(st, compact) {
   const kcalAvg = st.intakeDays ? st.kcal / st.intakeDays : null;
   const proteinAvg = st.intakeDays ? st.protein / st.intakeDays : null;
   const balAvg = st.bothDays ? st.balance / st.bothDays : null;
@@ -1051,33 +1046,28 @@ function avgRow(st) {
   // and show the size, so the number always means what the label says.
   const balLabel = balAvg == null ? "avg balance" : balAvg <= 0 ? "avg deficit" : "avg surplus";
   return `<div class="stat-row">
-    ${stat("avg intake", kcalAvg, "kcal", st.intakeDays)}
-    ${stat("avg protein", proteinAvg, "g", st.intakeDays)}
-    ${stat(balLabel, balAvg == null ? null : Math.abs(balAvg), "kcal", st.bothDays,
+    ${stat("avg intake", kcalAvg, "kcal", compact ? null : st.intakeDays)}
+    ${stat("avg protein", proteinAvg, "g", compact ? null : st.intakeDays)}
+    ${stat(balLabel, balAvg == null ? null : Math.abs(balAvg), "kcal", compact ? null : st.bothDays,
            balAvg == null ? "" : balAvg <= 0 ? "neg" : "pos")}
   </div>`;
 }
 
-function statsBlock(st) {
+function statsBlock(st, compact) {
   if (!st.intakeDays && !st.bothDays) {
     return `<div class="empty-note">No meals logged${
       st.outDays ? ` — expenditure synced for ${st.outDays} of ${st.n} days` : ""}.</div>`;
   }
   const d = st.intakeDays;
   return `
-    ${avgRow(st)}
+    ${avgRow(st, compact)}
     ${d ? `
       ${st.targetDays
         ? `${bar("calories vs target", st.scoredKcal, st.targetKcal, "kcal", "kcal")}
            ${bar("protein vs target", st.scoredProtein, st.targetProtein, "protein", "g")}
            `
         : `<div class="avg-line">no target set for these days</div>`}
-    ` : ""}
-    ${st.bothDays ? `<div class="balance-line" style="margin-top:12px">
-      total ${st.balance <= 0 ? "deficit" : "surplus"} over ${st.bothDays} day${st.bothDays === 1 ? "" : "s"}
-      with both figures:
-      <span class="${st.balance <= 0 ? "neg" : "pos"}">${n0(Math.abs(st.balance))} kcal</span>
-      </div>` : ""}`;
+    ` : ""}`;
 }
 
 // Calendar weeks, Monday to Sunday, newest first. Chunking the counted days
@@ -1125,16 +1115,13 @@ function renderRollup() {
   const weekNo = (monday) => Math.round((Date.parse(monday + "T00:00:00Z") - firstMonday) / (7 * 86400000)) + 1;
   const weekCards = weeks.map(({ monday, sunday, days: week }) => {
     const st = statsFor(week);
-    const weights = week.filter((d) => d.weight_kg != null);
     return `
       <div class="block-card">
         <div class="block-title">
           <h2>Week ${weekNo(monday)} (${shortDate(monday)} – ${shortDate(sunday)})</h2>
           <span class="sub">${st.n} day${st.n === 1 ? "" : "s"} counted</span>
         </div>
-        ${statsBlock(st)}
-        ${weights.length >= 2 ? `<div class="avg-line" style="margin-top:8px">
-          weight ${n1(weights[0].weight_kg)} kg → ${n1(weights[weights.length - 1].weight_kg)} kg</div>` : ""}
+        ${statsBlock(st, true)}
       </div>`;
   }).join("");
 
