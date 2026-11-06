@@ -386,8 +386,15 @@
 // Identity is the session cookie. No endpoint takes a user id.
 const WINDOW_DAYS = 28;
 
+// The tab lives in the address, so a reload -- or a bookmark -- comes back to
+// it. The hash names what the button says, not the internal id.
+const MODES = [["days", "Days"], ["rollup", "Summary"], ["system", "System"]];
+const hashFor = (id) => "#" + MODES.find(([m]) => m === id)[1].toLowerCase();
+const modeFromHash = () =>
+  (MODES.find(([id]) => hashFor(id) === location.hash.toLowerCase()) || MODES[0])[0];
+
 let state = {
-  mode: "days",
+  mode: modeFromHash(),
   days: [],          // newest first, from /api/days
   activeDate: null,      // the day shown in full
   detail: {},        // date -> /api/day payload
@@ -465,9 +472,12 @@ function renderGoalLine() {
 }
 
 function renderModeTabs() {
-  const modes = [["days", "Days"], ["rollup", "Summary"], ["system", "System"]];
+  // replaceState, not location.hash: switching tabs should not pile up
+  // history entries for the back button to wade through.
+  if (location.hash !== hashFor(state.mode))
+    history.replaceState(null, "", hashFor(state.mode));
   el("modeTabs").innerHTML = "";
-  for (const [id, label] of modes) {
+  for (const [id, label] of MODES) {
     const b = document.createElement("button");
     b.className = "mode-tab" + (state.mode === id ? " active" : "");
     b.textContent = label;
