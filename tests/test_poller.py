@@ -385,3 +385,159 @@ class TestConnectorsAreIndependent:
         assert state["garmin"]["last_error"] is None
         assert state["bosch"]["last_error"] == "session expired"
         assert state["garmin"]["last_success_at"] is not None
+
+
+# ------------------------------------------------------------ fit profile ---
+
+def weigh_in(mid, ts, weight, bodyfat=22.4, **over):
+    return {"measurement_id": mid, "user_id": "42", "time_stamp": ts,
+            "weight": weight, "bodyfat": bodyfat, "muscle": 44.9 if bodyfat else 0.0,
+            "water": 56.9 if bodyfat else 0.0, "visfat": 6.0 if bodyfat else 0.0,
+            "bmr": 1819 if bodyfat else 0, "bodyage": 51 if bodyfat else 0,
+            "bmi": 27.9, **over}
+
+
+_NOW = int(dt.datetime.now(dt.timezone.utc).timestamp())
+
+
+class FakeScale:
+    """Stands in for a signed-in Fit Profile session: one page, then done."""
+
+    def __init__(self, items=(), deleted=(), fail=None, refreshed=False):
+        self.items, self.deleted = list(items), list(deleted)
+        self.fail, self.refreshed = fail, refreshed
+        self.user_id = "42"
+        self.blob = {"token": "t2", "user_id": "42"}
+        self.calls = []
+
+    def get(self, path, params):
+        self.calls.append((path, params))
+        if self.fail:
+            raise self.fail
+        return {"code": 200, "data": {"measurements": self.items,
+                                      "delete_measurement_ids": self.deleted,
+                                      "finish_flag": 1}}
+
+
+@pytest.fixture
+def scale_account(user, owner, pool):
+    owner.execute(
+        """INSERT INTO diet.fitprofile_credentials (user_id, secret_ciphertext, key_id)
+           VALUES (%s, %s, 'k')""", (user, b"ciphertext"))
+    return {"user_id": user, "email": "a@example.com",
+            "timezone": "Europe/Budapest", "secret_ciphertext": b"ciphertext",
+            "key_id": "k"}
+
+
+@pytest.fixture
+def fake_scale(monkeypatch):
+    from app import fitprofile, secretbox
+    monkeypatch.setattr(secretbox, "decrypt", lambda ct, kid: "{}")
+
+    def install(session):
+        monkeypatch.setattr(fitprofile, "resume", lambda blob: session)
+        return session
+    return install
+
+
+def stored_weigh_ins(pool, user):
+    with pool.user_tx(user) as cur:
+        return cur.execute("SELECT * FROM diet.weigh_ins ORDER BY measured_at").fetchall()
+
+
+class TestWeighIns:
+    def test_every_weigh_in_is_stored_with_its_figures(
+            self, scale_account, fake_scale, pool):
+        fake_scale(FakeScale([weigh_in("1", _NOW - 7200, 86.7, 0.0),
+                              weigh_in("2", _NOW - 3600, 86.4)]))
+        stored, removed, rejected = poller.poll_fitprofile(scale_account, 1, None)
+        assert (stored, removed, rejected) == (2, 0, [])
+        rows = stored_weigh_ins(pool, scale_account["user_id"])
+        assert [r["source"] for r in rows] == ["fitprofile", "fitprofile"]
+        assert rows[0]["body_fat_pct"] is None and rows[0]["visceral_fat"] is None
+        assert float(rows[1]["body_fat_pct"]) == 22.4
+        assert float(rows[1]["skeletal_muscle_pct"]) == 44.9
+        assert rows[1]["raw"]["measurement_id"] == "2"
+
+    def test_a_re_fetched_weigh_in_updates_rather_than_duplicates(
+            self, scale_account, fake_scale, pool):
+        fake_scale(FakeScale([weigh_in("1", _NOW, 86.4)]))
+        poller.poll_fitprofile(scale_account, 1, None)
+        fake_scale(FakeScale([weigh_in("1", _NOW, 86.5)]))
+        poller.poll_fitprofile(scale_account, 1, None)
+        rows = stored_weigh_ins(pool, scale_account["user_id"])
+        assert len(rows) == 1 and float(rows[0]["weight_kg"]) == 86.5
+
+    def test_a_weigh_in_deleted_in_the_app_is_deleted_here(
+            self, scale_account, fake_scale, pool):
+        """Deleted weigh-ins are usually mistakes -- a bag on the scale, the
+        wrong person. Left in place they would stay on the weight chart."""
+        fake_scale(FakeScale([weigh_in("1", _NOW - 60, 86.4),
+                              weigh_in("2", _NOW, 99.9)]))
+        poller.poll_fitprofile(scale_account, 1, None)
+        fake_scale(FakeScale(deleted=["2"]))
+        _, removed, _ = poller.poll_fitprofile(scale_account, 1, None)
+        assert removed == 1
+        assert [r["external_id"] for r in stored_weigh_ins(
+            pool, scale_account["user_id"])] == ["1"]
+
+    def test_one_implausible_weigh_in_costs_only_itself(
+            self, scale_account, fake_scale, pool):
+        fake_scale(FakeScale([weigh_in("1", _NOW, 86.4),
+                              weigh_in("2", _NOW, 864.0)]))
+        stored, _, rejected = poller.poll_fitprofile(scale_account, 1, None)
+        assert stored == 1 and "weigh_ins_weight_sane" in rejected[0]
+
+    def test_the_window_asks_for_changes_since_local_midnight(
+            self, scale_account, fake_scale):
+        """By change time, not measurement time: the scale holds readings taken
+        with the phone away and the app uploads them later."""
+        scale = fake_scale(FakeScale())
+        poller.poll_fitprofile(scale_account, 3, None)
+        tz = ZoneInfo(scale_account["timezone"])
+        start = dt.datetime.now(tz).date() - dt.timedelta(days=2)
+        since = dt.datetime.combine(start, dt.time(0, 0), tzinfo=tz)
+        assert scale.calls[0][1]["last_updated_at"] == int(since.timestamp())
+
+    def test_a_fresh_sign_in_is_persisted(self, scale_account, fake_scale, pool,
+                                          monkeypatch):
+        from app import secretbox
+        monkeypatch.setattr(secretbox, "encrypt", lambda s: (b"new-ct", "k2"))
+        fake_scale(FakeScale(refreshed=True))
+        poller.poll_fitprofile(scale_account, 1, None)
+        with pool.user_tx(scale_account["user_id"]) as cur:
+            row = cur.execute("SELECT secret_ciphertext, key_id "
+                              "FROM diet.fitprofile_credentials").fetchone()
+        assert bytes(row["secret_ciphertext"]) == b"new-ct" and row["key_id"] == "k2"
+
+    def test_a_fresh_sign_in_is_persisted_even_when_the_fetch_fails(
+            self, scale_account, fake_scale, pool, monkeypatch):
+        from app import fitprofile, secretbox
+        monkeypatch.setattr(secretbox, "encrypt", lambda s: (b"new-ct", "k2"))
+        fake_scale(FakeScale(refreshed=True,
+                             fail=fitprofile.FitProfileError("502")))
+        with pytest.raises(fitprofile.FitProfileError):
+            poller.poll_fitprofile(scale_account, 1, None)
+        with pool.user_tx(scale_account["user_id"]) as cur:
+            row = cur.execute("SELECT key_id FROM diet.fitprofile_credentials"
+                              ).fetchone()
+        assert row["key_id"] == "k2"
+
+    def test_a_rate_limit_is_raised_as_such(self, scale_account, fake_scale):
+        from app import fitprofile
+        fake_scale(FakeScale(fail=fitprofile.RateLimited("429")))
+        with pytest.raises(poller.RateLimited):
+            poller.poll_fitprofile(scale_account, 1, None)
+
+    def test_a_dead_password_is_distinguishable_from_a_blip(
+            self, scale_account, fake_scale):
+        from app import fitprofile
+        fake_scale(FakeScale(fail=fitprofile.NeedsLogin("wrong password")))
+        with pytest.raises(fitprofile.NeedsLogin):
+            poller.poll_fitprofile(scale_account, 1, None)
+
+    def test_weigh_ins_are_invisible_to_another_user(
+            self, scale_account, fake_scale, pool, other_user):
+        fake_scale(FakeScale([weigh_in("1", _NOW, 86.4)]))
+        poller.poll_fitprofile(scale_account, 1, None)
+        assert stored_weigh_ins(pool, other_user) == []

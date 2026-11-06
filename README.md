@@ -165,6 +165,22 @@ A ride both devices recorded appears twice, and each row names the other as
 its match. A watch cannot record an activity while it broadcasts heart rate to
 the bike, so rides with only a Bosch row are normal.
 
+Weigh-ins come from the **GE body-composition scale** through its **Fit
+Profile** app's cloud: every weigh-in, with body fat, muscle, water, visceral
+fat, bone, BMR and metabolic age, and the full payload (per-limb figures
+included) kept alongside. Run `manage.py fitprofile-login <email>` once with the
+Fit Profile account's email and password, then `python -m app.poller --only
+fitprofile --days 60` to backfill. The password is stored, encrypted like the
+other connectors' secrets, because the app's sign-in lasts 180 days and has no
+refresh token. `manage.py fitprofile-probe <email>` lists what the account
+returns.
+
+A day often has several weigh-ins. **The day's weight is the first one that
+measured body fat** (that needs bare feet, so in practice the morning one), else
+the first of the day. On a day with a weigh-in, the scale's weight replaces
+Garmin's; Garmin's still covers the days before the scale was connected. A
+weigh-in deleted in the app is deleted here too.
+
 The Summary also charts weight over the goal period, with a trend line. Scale
 readings are noisy and arrive with gaps, so the trend fits a line, smooths what
 is left on a ten-day *time* constant — a reading after a week away counts for

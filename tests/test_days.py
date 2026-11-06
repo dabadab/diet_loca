@@ -252,3 +252,101 @@ class TestIsolation:
             assert queries.target_on(cur, day) is None
             detail = queries.day_detail(cur, day)
             assert detail["meals"] == [] and detail["measurements"] == []
+
+
+# ------------------------------------------------------------- weigh-ins ---
+
+@pytest.fixture
+def weigh(pool, user):
+    """Step on the scale: one weigh-in at local `hh:mm` on `day`."""
+    n = iter(range(10_000))
+
+    def _weigh(day, hh_mm, weight, body_fat=None, **body):
+        hh, mm = map(int, hh_mm.split(":"))
+        at = dt.datetime.combine(day, dt.time(hh, mm), tzinfo=ZoneInfo(TZ))
+        cols = {"weight_kg": weight, "body_fat_pct": body_fat, **body}
+        with pool.user_tx(user) as cur:
+            cur.execute(
+                f"""INSERT INTO diet.weigh_ins
+                    (user_id, source, external_id, measured_at, {", ".join(cols)})
+                    VALUES (diet.current_user_id(), 'fitprofile', %s, %s,
+                            {", ".join(["%s"] * len(cols))})""",
+                (f"w{next(n)}", at, *cols.values()))
+    return _weigh
+
+
+class TestTheDaysWeight:
+    """Several weigh-ins a day is the normal case: in socks after midnight,
+    then the real one in the morning, sometimes again after a meal. The day's
+    weight is the first that measured body fat -- which needed bare feet -- or
+    failing that the first at all."""
+
+    def test_the_first_full_reading_wins_over_an_earlier_weight_only_one(
+            self, pool, user, weigh, today):
+        day = today - dt.timedelta(days=1)
+        weigh(day, "00:26", 86.7)                     # socks, just past midnight
+        weigh(day, "07:13", 86.4, body_fat=22.4)      # the morning one
+        weigh(day, "21:00", 87.3, body_fat=22.9)      # after dinner
+        assert day_rows(pool, user)[day.isoformat()]["weight_kg"] == 86.4
+
+    def test_without_a_full_reading_the_first_one_counts(
+            self, pool, user, weigh, today):
+        day = today - dt.timedelta(days=1)
+        weigh(day, "06:00", 86.5)
+        weigh(day, "22:00", 87.1)
+        assert day_rows(pool, user)[day.isoformat()]["weight_kg"] == 86.5
+
+    def test_the_scale_wins_over_a_hand_typed_garmin_weight(
+            self, pool, user, weigh, log, today):
+        day = today - dt.timedelta(days=1)
+        log(day, weight=87.0)
+        weigh(day, "07:00", 86.45, body_fat=22.4)
+        assert day_rows(pool, user)[day.isoformat()]["weight_kg"] == 86.5  # 86.45, 1 dp
+
+    def test_garmin_still_covers_days_without_a_weigh_in(
+            self, pool, user, weigh, log, today):
+        before = today - dt.timedelta(days=5)
+        log(before, weight=88.0)
+        weigh(today - dt.timedelta(days=1), "07:00", 86.4, body_fat=22.4)
+        rows = day_rows(pool, user)
+        assert rows[before.isoformat()]["weight_kg"] == 88.0
+
+    def test_a_weigh_in_just_after_midnight_belongs_to_the_new_day(
+            self, pool, user, weigh, today):
+        """Days are the user's own calendar days; 00:26 Budapest is the
+        previous day in UTC, which is where a naive date would put it."""
+        day = today - dt.timedelta(days=1)
+        weigh(day, "00:26", 86.7)
+        assert day_rows(pool, user)[day.isoformat()]["weight_kg"] == 86.7
+
+    def test_day_detail_lists_every_weigh_in_and_flags_the_days_one(
+            self, pool, user, weigh, today):
+        day = today - dt.timedelta(days=1)
+        weigh(day, "00:26", 86.7)
+        weigh(day, "07:13", 86.4, body_fat=22.4)
+        with pool.user_tx(user) as cur:
+            detail = queries.day_detail(cur, day)
+        assert [w["weight_kg"] for w in detail["weigh_ins"]] == [86.7, 86.4]
+        assert [w["days_weight"] for w in detail["weigh_ins"]] == [False, True]
+
+    def test_the_range_has_one_weight_a_day_whichever_instrument(
+            self, pool, user, weigh, log, today):
+        scaled, typed = today - dt.timedelta(days=1), today - dt.timedelta(days=2)
+        log(scaled, weight=87.0)
+        log(typed, weight=88.0)
+        weigh(scaled, "00:26", 86.7)
+        weigh(scaled, "07:13", 86.4, body_fat=22.4, visceral_fat=6)
+        with pool.user_tx(user) as cur:
+            rows = queries.range_metrics(cur, typed, scaled,
+                                         ["weight_kg", "body_fat_pct", "visceral_fat"])
+        got = {(r["local_date"], r["metric"]): (r["value"], r["source"]) for r in rows}
+        assert got == {
+            (typed.isoformat(), "weight_kg"): (88.0, "garmin"),
+            (scaled.isoformat(), "weight_kg"): (86.4, "fitprofile"),
+            (scaled.isoformat(), "body_fat_pct"): (22.4, "fitprofile"),
+            (scaled.isoformat(), "visceral_fat"): (6.0, "fitprofile"),
+        }
+
+    def test_an_unknown_metric_is_named_with_the_known_ones(self, pool, user, today):
+        with pool.user_tx(user) as cur, pytest.raises(ValueError, match="visceral_fat"):
+            queries.range_metrics(cur, today, today, ["belly"])

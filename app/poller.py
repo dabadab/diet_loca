@@ -46,7 +46,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
-from . import bosch, config, db, garmin, secretbox
+from . import bosch, config, db, fitprofile, garmin, secretbox
 
 log = logging.getLogger("diet.poller")
 
@@ -109,8 +109,23 @@ def _owner_conn(settings):
     return psycopg.connect(settings.migration_database_url, row_factory=dict_row)
 
 
+_WEIGH_IN_COLUMNS = ("weight_kg",) + fitprofile.BODY_COLUMNS
+
+WEIGH_IN_UPSERT = f"""
+INSERT INTO diet.weigh_ins
+  (user_id, source, external_id, measured_at, {", ".join(_WEIGH_IN_COLUMNS)}, raw)
+VALUES (diet.current_user_id(), %(source)s, %(external_id)s, %(measured_at)s,
+        {", ".join(f"%({c})s" for c in _WEIGH_IN_COLUMNS)}, %(raw)s)
+ON CONFLICT (user_id, source, external_id) DO UPDATE SET
+  measured_at = EXCLUDED.measured_at,
+  {", ".join(f"{c} = EXCLUDED.{c}" for c in _WEIGH_IN_COLUMNS)},
+  raw = EXCLUDED.raw, ingested_at = now()
+"""
+
+
 CREDENTIAL_TABLES = {"garmin": "diet.garmin_credentials",
-                     "bosch": "diet.bosch_credentials"}
+                     "bosch": "diet.bosch_credentials",
+                     "fitprofile": "diet.fitprofile_credentials"}
 
 
 def _accounts(settings, only_email: str | None,
@@ -147,6 +162,18 @@ def _store_bosch_tokens(user_id, token_json: str) -> None:
     ciphertext, key_id = secretbox.encrypt(token_json)
     with db.user_tx(user_id) as cur:
         cur.execute("""UPDATE diet.bosch_credentials
+                       SET secret_ciphertext = %s, key_id = %s, updated_at = now()
+                       WHERE user_id = diet.current_user_id()""",
+                    (ciphertext, key_id))
+
+
+def _store_fitprofile_blob(user_id, blob_json: str) -> None:
+    """A fresh sign-in's token. Not strictly needed -- the password is in the
+    blob and would sign in again -- but every unnecessary sign-in is one more
+    login event on someone's account."""
+    ciphertext, key_id = secretbox.encrypt(blob_json)
+    with db.user_tx(user_id) as cur:
+        cur.execute("""UPDATE diet.fitprofile_credentials
                        SET secret_ciphertext = %s, key_id = %s, updated_at = now()
                        WHERE user_id = diet.current_user_id()""",
                     (ciphertext, key_id))
@@ -247,6 +274,36 @@ def _write_activities(user_id, rows: list[dict],
                 rejected.append(f"{source} {row['external_id']} "
                                 f"({getattr(exc.diag, 'constraint_name', '?')})")
     return stored, rejected
+
+
+def _write_weigh_ins(user_id, rows: list[dict], deleted: list[str],
+                     source: str = "fitprofile") -> tuple[int, int, list[str]]:
+    """Upsert weigh-ins and apply deletions. Returns (stored, deleted, rejected)."""
+    stored, rejected = 0, []
+    removed = 0
+    if not rows and not deleted:
+        return 0, 0, []
+    with db.user_tx(user_id) as cur:
+        for row in rows:
+            params = {**row, "source": source, "raw": Json(row["raw"])}
+            cur.execute("SAVEPOINT weigh_in")
+            try:
+                cur.execute(WEIGH_IN_UPSERT, params)
+                cur.execute("RELEASE SAVEPOINT weigh_in")
+                stored += 1
+            except psycopg.Error as exc:
+                cur.execute("ROLLBACK TO SAVEPOINT weigh_in")
+                rejected.append(f"{source} {row['external_id']} "
+                                f"({getattr(exc.diag, 'constraint_name', '?')})")
+        if deleted:
+            # Deleted in the app means deleted here: a weigh-in someone removed
+            # was usually a mistake (a bag on the scale, the wrong person), and
+            # keeping it would put it back on the weight chart.
+            cur.execute("""DELETE FROM diet.weigh_ins
+                           WHERE source = %s AND external_id = ANY(%s)""",
+                        (source, deleted))
+            removed = cur.rowcount
+    return stored, removed, rejected
 
 
 class RateLimited(RuntimeError):
@@ -376,6 +433,41 @@ def poll_bosch(account: dict, days: int,
     return stored, rejected
 
 
+def poll_fitprofile(account: dict, days: int,
+                    raw_root: Path | None) -> tuple[int, int, list[str]]:
+    """
+    One account's weigh-ins changed over the window. Returns (stored, deleted,
+    rejected).
+
+    The window is "changed since", not "measured since": the scale keeps
+    readings taken while the phone was away and the app uploads them later, so
+    a weigh-in from last week can first appear today. Asking by change time
+    catches it; asking by measurement time would miss it for good.
+    """
+    user_id = account["user_id"]
+    tz = ZoneInfo(account["timezone"])
+    session = fitprofile.resume(
+        secretbox.decrypt(account["secret_ciphertext"], account["key_id"]))
+    today = datetime.now(tz).date()
+    since = datetime.combine(today - timedelta(days=max(days - 1, 0)),
+                             time_of_day(0, 0), tzinfo=tz)
+    raw_dir = (raw_root / account["email"]) if raw_root else None
+    try:
+        try:
+            items, deleted = fitprofile.fetch_weigh_ins(session, since, raw_dir)
+        except fitprofile.RateLimited as exc:
+            raise RateLimited(str(exc)) from exc
+        rows = [r for r in (fitprofile.extract_weigh_in(i, session.user_id)
+                            for i in items) if r]
+        return _write_weigh_ins(user_id, rows, deleted)
+    finally:
+        # Persist a fresh sign-in even when the fetch after it failed: it is a
+        # valid token either way, and the next run should not sign in again.
+        if session.refreshed:
+            _store_fitprofile_blob(user_id, fitprofile.session_blob(session))
+            log.info("fitprofile: signed in again for %s", account["email"])
+
+
 def run_once(settings, args, raw_root: Path | None, days: int | None = None,
              include_bosch: bool = True) -> int:
     """
@@ -386,14 +478,24 @@ def run_once(settings, args, raw_root: Path | None, days: int | None = None,
     cycle's whole virtue is that it is cheap. It is an argument rather than
     something inferred from `days`, so that widening the short window cannot
     quietly start calling a second API every quarter hour.
+
+    Fit Profile, by contrast, runs on both cycles: a morning weigh-in is the
+    one reading someone wants to see straight away, and asking for "what
+    changed today" is a single request.
     """
     window = args.days if days is None else days
     prune_raw(raw_root, args.keep_raw_days)
     only = getattr(args, "only", None)
-    accounts = [] if only == "bosch" else _accounts(settings, args.user)
+
+    def wanted(connector: str) -> bool:
+        return only is None or only == connector
+
+    accounts = _accounts(settings, args.user) if wanted("garmin") else []
     bosch_accounts = (_accounts(settings, args.user, "bosch")
-                      if include_bosch and only != "garmin" else [])
-    if not accounts and not bosch_accounts:
+                      if include_bosch and wanted("bosch") else [])
+    scale_accounts = (_accounts(settings, args.user, "fitprofile")
+                      if wanted("fitprofile") else [])
+    if not accounts and not bosch_accounts and not scale_accounts:
         log.warning("no connector credentials stored%s; nothing to do",
                     f" for {args.user}" if args.user else "")
         _write_status(True, "no-accounts")
@@ -465,6 +567,41 @@ def run_once(settings, args, raw_root: Path | None, days: int | None = None,
                 message = f"{type(exc).__name__}: {exc}"[:400]
                 log.error("bosch: %s failed: %s", email, message)
                 _try_record(account["user_id"], message, "bosch")
+
+        for account in scale_accounts:
+            email = account["email"]
+            try:
+                if not claim(account["user_id"], connector="fitprofile"):
+                    log.info("fitprofile: %s skipped, a sync is already in flight",
+                             email)
+                    continue
+                stored, removed, rejected = poll_fitprofile(account, window, raw_root)
+                _record(account["user_id"], ok=True, error=None,
+                        connector="fitprofile")
+                log.info("fitprofile: %s stored %d weigh-in(s), deleted %d, "
+                         "over %d day(s)%s", email, stored, removed, window,
+                         f", {len(rejected)} rejected: {'; '.join(rejected[:4])}"
+                         if rejected else "")
+            except RateLimited as exc:
+                failures += 1
+                rate_limited = True
+                message = f"Fit Profile rate-limited this client: {exc}"[:400]
+                log.error("fitprofile: %s %s", email, message)
+                _try_record(account["user_id"], message, "fitprofile")
+            except fitprofile.NeedsLogin as exc:
+                # The stored password no longer signs in -- changed in the app,
+                # most likely. Retrying it every quarter hour would only look
+                # like someone guessing, so say which command fixes it.
+                failures += 1
+                message = (f"Fit Profile sign-in failed; run "
+                           f"`manage.py fitprofile-login {email}`: {exc}")[:400]
+                log.error("fitprofile: %s", message)
+                _try_record(account["user_id"], message, "fitprofile")
+            except Exception as exc:
+                failures += 1
+                message = f"{type(exc).__name__}: {exc}"[:400]
+                log.error("fitprofile: %s failed: %s", email, message)
+                _try_record(account["user_id"], message, "fitprofile")
     finally:
         db.close_pool()
 
@@ -509,9 +646,10 @@ def main() -> int:
     ap.add_argument("--days", type=int, default=int(os.environ.get("GARMIN_POLL_DAYS", "3")),
                     help="trailing days to re-fetch (sleep lands late; upserts are idempotent)")
     ap.add_argument("--user", default=None, help="limit to one account by email")
-    ap.add_argument("--only", choices=("garmin", "bosch"), default=None,
-                    help="sync just one connector -- to backfill Bosch rides over a "
-                         "long --days window without re-fetching a month of Garmin")
+    ap.add_argument("--only", choices=("garmin", "bosch", "fitprofile"), default=None,
+                    help="sync just one connector -- to backfill Bosch rides or "
+                         "weigh-ins over a long --days window without re-fetching "
+                         "a month of Garmin")
     ap.add_argument("--raw-dir", default=os.environ.get("GARMIN_RAW_DIR", "/var/log/diet/garmin"),
                     help="where raw payloads are archived; empty to skip")
     ap.add_argument("--keep-raw-days", type=int,

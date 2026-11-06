@@ -8,6 +8,22 @@ WHERE user_id = ... ever appears in this file, something has gone wrong.
 
 from __future__ import annotations
 
+# The day's weigh-in, one per day: the first one that measured body composition,
+# or failing that the first one at all. "First full reading" because the late
+# ones are the noisy ones -- after a meal, in socks just past midnight -- and a
+# reading with body fat needed bare feet on the plates, which in practice is the
+# morning one. Every weigh-in stays in diet.weigh_ins; this only picks.
+#
+# Where a day has a weigh-in it wins over Garmin's weight, which was typed in by
+# hand from the same scale; Garmin's still covers the days before the scale was
+# connected and any day it was skipped.
+def _scale_day_sql(where: str) -> str:
+    return f"""
+    SELECT DISTINCT ON (local_date) *
+    FROM diet.weigh_ins
+    WHERE {where}
+    ORDER BY local_date, (body_fat_pct IS NULL), measured_at"""
+
 _DAYS_SQL = """
 WITH bounds AS (
     SELECT (now() AT TIME ZONE %(tz)s::text)::date                  AS to_date,
@@ -45,6 +61,8 @@ meas AS (
     FROM diet.measurements
     WHERE local_date >= (SELECT from_date FROM bounds)
     GROUP BY local_date
+),
+scale AS (""" + _scale_day_sql("local_date >= (SELECT from_date FROM bounds)") + """
 )
 SELECT cal.local_date                                        AS date,
        round(intake.kcal)::int                               AS energy_in_kcal,
@@ -67,7 +85,7 @@ SELECT cal.local_date                                        AS date,
        -- has accumulated so far.
        round(meas.active_kcal)::int                           AS active_kcal,
        round(meas.total_kcal)::int                            AS total_kcal,
-       round(meas.weight_kg::numeric, 1)                     AS weight_kg,
+       round(coalesce(scale.weight_kg, meas.weight_kg::numeric), 1) AS weight_kg,
        tgt.kcal::int                                         AS target_kcal,
        round(tgt.protein_g, 1)                               AS target_protein_g,
        coalesce(logged.meals, 0)::int                        AS meals_logged,
@@ -94,6 +112,7 @@ LEFT JOIN diet.ignored_days ign ON ign.local_date = cal.local_date
 LEFT JOIN intake ON intake.local_date = cal.local_date
 LEFT JOIN logged ON logged.local_date = cal.local_date
 LEFT JOIN meas   ON meas.local_date   = cal.local_date
+LEFT JOIN scale  ON scale.local_date  = cal.local_date
 ORDER BY cal.local_date DESC
 """
 
@@ -140,6 +159,19 @@ def sync_snapshot(cur) -> dict:
 KNOWN_METRICS = ("weight_kg", "resting_hr", "sleep_minutes", "steps",
                  "active_kcal", "total_kcal", "body_fat_pct")
 
+# What the scale's daily pick contributes to a range, and the unit of each.
+# weight_kg and body_fat_pct overlap with KNOWN_METRICS: on a day with a
+# weigh-in the scale's figure replaces Garmin's, the same rule as days().
+SCALE_METRICS = {
+    "weight_kg": "kg", "body_fat_pct": "%", "bmi": "kg/m2",
+    "skeletal_muscle_pct": "%", "muscle_mass_kg": "kg", "fat_free_mass_kg": "kg",
+    "subcutaneous_fat_pct": "%", "visceral_fat": "index", "body_water_pct": "%",
+    "protein_pct": "%", "bone_mass_kg": "kg", "bmr_kcal": "kcal",
+    "metabolic_age": "years",
+}
+RANGE_METRICS = KNOWN_METRICS + tuple(m for m in SCALE_METRICS
+                                      if m not in KNOWN_METRICS)
+
 
 def day_detail(cur, local_date) -> dict:
     """Everything recorded for one calendar day, in the user's own timezone."""
@@ -177,6 +209,14 @@ def day_detail(cur, local_date) -> dict:
         {**dict(r), "ts_utc": r["ts_utc"].isoformat()} for r in cur.fetchall()
     ]
 
+    cur.execute(f"""
+        SELECT measured_at, source, weight_kg, {", ".join(_BODY_COLUMNS)}
+        FROM diet.weigh_ins
+        WHERE local_date = %(d)s
+        ORDER BY measured_at
+    """, {"d": local_date})
+    weigh_ins = [_weigh_in_row(r) for r in cur.fetchall()]
+
     cur.execute(_TARGET_ON_SQL, {"d": local_date})
     tgt = cur.fetchone()
 
@@ -188,6 +228,9 @@ def day_detail(cur, local_date) -> dict:
         "date": str(local_date),
         "meals": meals,
         "measurements": measurements,
+        # Every weigh-in of the day, in order. The one the day's weight comes
+        # from is flagged, so a reader can see why it was that one.
+        "weigh_ins": _flag_pick(weigh_ins),
         # Context only. Their calories are already counted inside the day's
         # active_kcal measurement, so energy_in_kcal below does not touch them
         # and nothing downstream may add them to expenditure.
@@ -202,20 +245,61 @@ def day_detail(cur, local_date) -> dict:
     }
 
 
+_BODY_COLUMNS = tuple(m for m in SCALE_METRICS if m != "weight_kg")
+
+
+def _weigh_in_row(r) -> dict:
+    row = dict(r)
+    row["measured_at"] = row["measured_at"].isoformat()
+    for k in ("weight_kg",) + _BODY_COLUMNS:
+        if row[k] is not None:
+            row[k] = float(row[k])
+    return row
+
+
+def _flag_pick(weigh_ins: list[dict]) -> list[dict]:
+    """Mark the day's weigh-in by the same rule as _scale_day_sql: the first
+    with body fat, else the first. Input is in time order."""
+    pick = next((w for w in weigh_ins if w["body_fat_pct"] is not None),
+                weigh_ins[0] if weigh_ins else None)
+    return [{**w, "days_weight": w is pick} for w in weigh_ins]
+
+
 def range_metrics(cur, from_date, to_date, metrics: list[str] | None = None) -> list[dict]:
-    """Measured series over a date range. Estimated data is not in here by design."""
-    wanted = list(metrics) if metrics else list(KNOWN_METRICS)
-    unknown = [m for m in wanted if m not in KNOWN_METRICS]
+    """
+    Measured series over a date range. Estimated data is not in here by design.
+
+    Garmin's metrics come from diet.measurements; the body-composition ones from
+    each day's chosen weigh-in. On a day with a weigh-in, its weight and body fat
+    replace Garmin's rather than sit beside them, so a series has one value a
+    day whichever instrument it came from.
+    """
+    wanted = list(metrics) if metrics else list(RANGE_METRICS)
+    unknown = [m for m in wanted if m not in RANGE_METRICS]
     if unknown:
         raise ValueError(
-            f"unknown metric(s) {unknown}; known metrics are {list(KNOWN_METRICS)}")
+            f"unknown metric(s) {unknown}; known metrics are {list(RANGE_METRICS)}")
 
-    cur.execute("""
+    # Names and units are this module's constants, never input; the % in a unit
+    # is doubled because psycopg would read it as a placeholder.
+    scale_values = ", ".join(f"('{m}', s.{m}::float8, '{u.replace('%', '%%')}')"
+                             for m, u in SCALE_METRICS.items())
+    cur.execute(f"""
+        WITH scale_day AS ({_scale_day_sql("local_date BETWEEN %(a)s AND %(b)s")})
         SELECT local_date, metric, value, unit, source
-        FROM diet.measurements
+        FROM diet.measurements m
         WHERE local_date BETWEEN %(a)s AND %(b)s AND metric = ANY(%(m)s)
+          AND NOT (metric = ANY(%(scale)s)
+                   AND EXISTS (SELECT 1 FROM scale_day s
+                               WHERE s.local_date = m.local_date))
+        UNION ALL
+        SELECT s.local_date, v.metric, v.value, v.unit, s.source
+        FROM scale_day s
+        CROSS JOIN LATERAL (VALUES {scale_values}) AS v(metric, value, unit)
+        WHERE v.value IS NOT NULL AND v.metric = ANY(%(m)s)
         ORDER BY local_date, metric
-    """, {"a": from_date, "b": to_date, "m": wanted})
+    """, {"a": from_date, "b": to_date, "m": wanted,
+          "scale": list(SCALE_METRICS)})
     return [{**dict(r), "local_date": r["local_date"].isoformat()} for r in cur.fetchall()]
 
 

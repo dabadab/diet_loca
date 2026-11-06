@@ -580,6 +580,70 @@ fresh one refused. The constraints are named and replaced in their own loop, and
 `TestMigratingAnOlderDatabase` simulates an older database rather than trusting
 a fresh one to prove anything about the upgrade path.
 
+## Fit Profile weigh-ins (the GE scale)
+
+`app/fitprofile.py`. The scale is a Yolanda/QN "Fit Plus" (CS10G) sold under the
+GE name; it talks Bluetooth to the **Fit Profile** app, which uploads every
+weigh-in to `https://fit-profile.qnclouds.com/` — the same QN cloud Renpho's app
+used. There is no public API and no web portal. The user asked for this route
+specifically over bridging through Health Connect → Garmin, on the grounds that
+each hop can drop data; the app's own CSV export, checked against the API, held
+2 of the 34 weigh-ins the API returned.
+
+**How it was found.** Everything was read out of the Android app (1.38.0) with
+jadx: `Api.kt` for the host, `EncryptDecryptInterceptor` / `EncryptUtil` for the
+wire format, the H5 bundle's `user-*.js` and `index-*.js` for the sign-in and its
+RSA key, `MeasureDataService` for the list endpoint. The `api/v1/measure/*`
+paths the H5 pages call are served by the app's **local** web server from its
+own database, and 404 remotely; the remote one is
+`api/v4/measurements/list_measurement`. Probes by others had tried
+`fitprofile.qnclouds.com` (no hyphen) and stopped.
+
+**Wire format.** AES-128-ECB with PKCS#7 under the app's built-in key, URL-safe
+base64 without padding. GET parameters travel as one encrypted `ciphertext`
+query parameter, POST bodies as `{"ciphertext": …}`, and a reply's `data` is
+encrypted JSON. A fixed set of plain parameters (`app_id=fit_profile`, platform,
+locale…) rides on every request. The test suite pins the cipher to bytes the
+live server returned.
+
+**Sign-in** RSA-encrypts the password (PKCS#1 v1.5) and returns a JWT good for
+180 days, with **no refresh token**. So, unlike Garmin and Bosch, the stored
+blob keeps the password: the session signs in again by itself when the token
+nears expiry or is refused (once — a second refusal is NeedsLogin, which the
+poller reports with the command that fixes it rather than retrying every
+quarter hour against someone's account). A fresh sign-in is persisted even if
+the fetch after it fails.
+
+**Listing is an incremental sync**: weigh-ins *changed* since a timestamp, plus
+ids *deleted* since, with a server-side cursor (`finish_flag`,
+`last_updated_at`, `last_measurement_id`). The poller asks "changed since local
+midnight N-1 days ago", not "measured since": the scale stores readings taken
+while the phone is away and the app uploads them later. Deletions are applied —
+a deleted weigh-in was usually a mistake, and kept it would sit on the weight
+chart. It runs on **both** poller cycles: a morning weigh-in is the reading
+someone wants to see at once, and the short cycle's request is one call.
+
+**Storage** is `diet.weigh_ins`, one row per weigh-in, shaped like activities
+rather than measurements: a dozen figures from one impedance reading, only
+meaningful together. Headline figures are columns; the rest (segmental
+fat/muscle, raw impedances, the scale's own score) stays in `raw`. The scale
+sends **0.0 for every figure it could not take** — a weigh-in in socks has a
+weight and nothing else — and those become NULL, since 0 % body fat is a claim.
+The CHECKs refuse a zero body fat for exactly that reason.
+
+**The day's weight** is a read-time rule, not a write-time one (`queries.py`,
+`_scale_day_sql`): the first weigh-in that measured body fat, else the first of
+the day. Several a day is normal for this user — just past midnight in socks,
+the morning one, sometimes after dinner — and the late ones are the noisy ones.
+On a day with a weigh-in it replaces Garmin's `weight_kg`, which until then was
+typed in by hand from this same scale; Garmin's still covers the earlier days.
+`get_range` serves the body-composition figures from the same pick, and
+`get_day` lists every weigh-in with the chosen one flagged. `/api/days` is
+unchanged in shape: it carries `weight_kg`, now resolved by this rule.
+
+The scale's `bmr` is a formula from weight and impedance, not a measurement; it
+is stored and served, and kept out of energy expenditure.
+
 ## The weight chart
 
 On the Summary tab, over the same window as everything else there: since the

@@ -84,7 +84,7 @@ END $dom$;
 -- and evolvable: adding a writer means editing one line here and nothing else.
 ALTER DOMAIN diet.provenance DROP CONSTRAINT IF EXISTS provenance_check;
 ALTER DOMAIN diet.provenance ADD CONSTRAINT provenance_check
-  CHECK (VALUE IN ('garmin', 'bosch', 'claude-estimate', 'manual'));
+  CHECK (VALUE IN ('garmin', 'bosch', 'fitprofile', 'claude-estimate', 'manual'));
 
 -- ----------------------------------------------------------- auth.users ---
 
@@ -531,6 +531,82 @@ DROP TRIGGER IF EXISTS activities_local_date ON diet.activities;
 CREATE TRIGGER activities_local_date BEFORE INSERT OR UPDATE ON diet.activities
   FOR EACH ROW EXECUTE FUNCTION diet.set_local_date('started_at');
 
+-- ------------------------------------------------------------ weigh_ins ---
+-- One row per step onto the body-composition scale (Fit Profile, the GE
+-- scale's app). Not rows in measurements, for the same reason activities are
+-- not: one weigh-in is a dozen figures taken together from one impedance
+-- reading, and they are only meaningful side by side.
+--
+-- Every weigh-in is kept, not one per day. People weigh more than once -- after
+-- midnight in socks, again in the morning -- and which of those is "the day's
+-- weight" is a reading rule (queries.py), not something to bake in at write
+-- time and lose the rest.
+--
+-- The body-composition columns are NULL on a weight-only weigh-in (no bare-feet
+-- contact, so no impedance). Fit Profile sends those as 0.0; the parser turns
+-- them into NULL, because "not measured" is not "0 % body fat".
+
+CREATE TABLE IF NOT EXISTS diet.weigh_ins (
+  weigh_in_id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  user_id       uuid NOT NULL REFERENCES auth.users(user_id) ON DELETE CASCADE,
+  source        diet.provenance NOT NULL,
+  external_id   text NOT NULL,          -- Fit Profile measurement_id
+  measured_at   timestamptz NOT NULL,
+  local_date    date NOT NULL,
+  weight_kg     numeric(5,2) NOT NULL,
+  body_fat_pct          numeric(4,1),
+  bmi                   numeric(4,1),
+  skeletal_muscle_pct   numeric(4,1),
+  muscle_mass_kg        numeric(5,2),
+  fat_free_mass_kg      numeric(5,2),
+  subcutaneous_fat_pct  numeric(4,1),
+  visceral_fat          numeric(4,1),   -- an index, not a mass
+  body_water_pct        numeric(4,1),
+  protein_pct           numeric(4,1),
+  bone_mass_kg          numeric(4,2),
+  bmr_kcal              numeric(5,0),   -- the scale's formula, not a measurement
+  metabolic_age         numeric(3,0),
+  -- The weigh-in verbatim: segmental figures, raw impedances and everything
+  -- else not promoted to a column, so it can be recovered without re-fetching.
+  raw           jsonb,
+  ingested_at   timestamptz NOT NULL DEFAULT now(),
+  -- Re-fetching overwrites: the app lets a weigh-in be reassigned or edited.
+  UNIQUE (user_id, source, external_id)
+);
+
+CREATE INDEX IF NOT EXISTS weigh_ins_lookup_idx
+  ON diet.weigh_ins (user_id, local_date DESC, measured_at);
+
+-- Named and replaced rather than inline, as for the Bosch columns, so a later
+-- change to a range reaches a database that already has the table.
+DO $wi$
+DECLARE c record;
+BEGIN
+  FOR c IN SELECT * FROM (VALUES
+      ('weigh_ins_weight_sane',      'weight_kg BETWEEN 20 AND 400'),
+      ('weigh_ins_body_fat_sane',    'body_fat_pct IS NULL OR body_fat_pct BETWEEN 1 AND 75'),
+      ('weigh_ins_bmi_sane',         'bmi IS NULL OR bmi BETWEEN 8 AND 100'),
+      ('weigh_ins_skeletal_sane',    'skeletal_muscle_pct IS NULL OR skeletal_muscle_pct BETWEEN 5 AND 90'),
+      ('weigh_ins_muscle_sane',      'muscle_mass_kg IS NULL OR muscle_mass_kg BETWEEN 5 AND 300'),
+      ('weigh_ins_fat_free_sane',    'fat_free_mass_kg IS NULL OR fat_free_mass_kg BETWEEN 10 AND 300'),
+      ('weigh_ins_subfat_sane',      'subcutaneous_fat_pct IS NULL OR subcutaneous_fat_pct BETWEEN 1 AND 75'),
+      ('weigh_ins_visceral_sane',    'visceral_fat IS NULL OR visceral_fat BETWEEN 1 AND 60'),
+      ('weigh_ins_water_sane',       'body_water_pct IS NULL OR body_water_pct BETWEEN 20 AND 85'),
+      ('weigh_ins_protein_sane',     'protein_pct IS NULL OR protein_pct BETWEEN 2 AND 40'),
+      ('weigh_ins_bone_sane',        'bone_mass_kg IS NULL OR bone_mass_kg BETWEEN 0.5 AND 10'),
+      ('weigh_ins_bmr_sane',         'bmr_kcal IS NULL OR bmr_kcal BETWEEN 500 AND 5000'),
+      ('weigh_ins_metabolic_age_sane', 'metabolic_age IS NULL OR metabolic_age BETWEEN 5 AND 120')
+    ) AS t(name, expr) LOOP
+    EXECUTE format('ALTER TABLE diet.weigh_ins DROP CONSTRAINT IF EXISTS %I', c.name);
+    EXECUTE format('ALTER TABLE diet.weigh_ins ADD CONSTRAINT %I CHECK (%s)',
+                   c.name, c.expr);
+  END LOOP;
+END $wi$;
+
+DROP TRIGGER IF EXISTS weigh_ins_local_date ON diet.weigh_ins;
+CREATE TRIGGER weigh_ins_local_date BEFORE INSERT OR UPDATE ON diet.weigh_ins
+  FOR EACH ROW EXECUTE FUNCTION diet.set_local_date('measured_at');
+
 -- --------------------------------------------------------------- meals ----
 -- Estimated data, deliberately not sharing columns with measurements.
 -- Corrections are append-only: a correction inserts a new meal and points the
@@ -608,7 +684,7 @@ CREATE TABLE IF NOT EXISTS diet.sync_state (
 
 ALTER TABLE diet.sync_state DROP CONSTRAINT IF EXISTS sync_state_connector_check;
 ALTER TABLE diet.sync_state ADD CONSTRAINT sync_state_connector_check
-  CHECK (connector IN ('garmin', 'bosch', 'claude-mcp'));
+  CHECK (connector IN ('garmin', 'bosch', 'fitprofile', 'claude-mcp'));
 
 -- Ciphertext only. The key lives outside the database, so a dump of this
 -- table is not a set of Garmin logins.
@@ -625,6 +701,18 @@ CREATE TABLE IF NOT EXISTS diet.garmin_credentials (
 -- One generic connector_credentials table would be the tidier end state; it
 -- would also mean migrating a live credential for no visible gain.
 CREATE TABLE IF NOT EXISTS diet.bosch_credentials (
+  user_id           uuid PRIMARY KEY REFERENCES auth.users(user_id) ON DELETE CASCADE,
+  secret_ciphertext bytea NOT NULL,
+  key_id            text NOT NULL,
+  updated_at        timestamptz NOT NULL DEFAULT now()
+);
+
+-- And for Fit Profile. Its token lasts 180 days and comes with no refresh
+-- token, so the blob holds the account password as well: the poller signs in
+-- again by itself when the token runs out, instead of waiting for a person.
+-- That makes this the most sensitive of the three, and it is treated no
+-- differently -- which is to say, already as well as anything here can be.
+CREATE TABLE IF NOT EXISTS diet.fitprofile_credentials (
   user_id           uuid PRIMARY KEY REFERENCES auth.users(user_id) ON DELETE CASCADE,
   secret_ciphertext bytea NOT NULL,
   key_id            text NOT NULL,
@@ -683,8 +771,9 @@ CREATE TABLE IF NOT EXISTS diet.ignored_days (
 DO $rls$
 DECLARE t text;
 BEGIN
-  FOREACH t IN ARRAY ARRAY['measurements', 'activities', 'meals', 'meal_items',
-                           'sync_state', 'garmin_credentials', 'bosch_credentials',
+  FOREACH t IN ARRAY ARRAY['measurements', 'activities', 'weigh_ins', 'meals',
+                           'meal_items', 'sync_state', 'garmin_credentials',
+                           'bosch_credentials', 'fitprofile_credentials',
                            'targets', 'ignored_days'] LOOP
     EXECUTE format('ALTER TABLE diet.%I ENABLE ROW LEVEL SECURITY', t);
     -- FORCE so the table owner is bound by the policy too.
@@ -709,9 +798,10 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA diet TO diet_app;
 -- schema also handed it diet.garmin_credentials, which the tool's own docstring
 -- never claimed and no query through it should reach.
 GRANT SELECT ON diet.meals, diet.meal_items, diet.measurements, diet.activities,
-                diet.sync_state, diet.targets, diet.ignored_days
+                diet.weigh_ins, diet.sync_state, diet.targets, diet.ignored_days
   TO diet_ro;
-REVOKE ALL ON diet.garmin_credentials, diet.bosch_credentials FROM diet_ro;
+REVOKE ALL ON diet.garmin_credentials, diet.bosch_credentials,
+              diet.fitprofile_credentials FROM diet_ro;
 
 -- The app role gets no table privileges in auth at all: identity is reachable
 -- only through the definer functions. The read-only role cannot even see the

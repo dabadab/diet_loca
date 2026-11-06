@@ -513,6 +513,87 @@ def cmd_bosch_forget(args) -> None:
     print(f"forgot the Bosch session for {args.email}")
 
 
+def cmd_fitprofile_login(args) -> None:
+    """
+    Sign in to Fit Profile once, and store the account -- password included --
+    encrypted.
+
+    Unlike Garmin and Bosch, the password is kept. Fit Profile's token lasts 180
+    days and comes with no refresh token, so the alternative is this command
+    twice a year, run by whoever notices the weight chart has stopped.
+    """
+    from . import fitprofile, secretbox
+
+    try:
+        secretbox.check_usable()
+    except secretbox.KeyUnavailable as exc:
+        sys.exit(f"{exc}\n\nFix the key first: nothing has been sent to Fit Profile.")
+
+    with _owner_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT user_id FROM auth.users WHERE email = lower(%s)",
+                    (args.email,))
+        row = cur.fetchone()
+    if row is None:
+        sys.exit(f"no such user: {args.email}")
+
+    fp_email = args.fitprofile_email or input("Fit Profile account email: ").strip()
+    password = getpass.getpass("Fit Profile password: ")
+    try:
+        blob = fitprofile.sign_in(fp_email, password)
+    except fitprofile.FitProfileError as exc:
+        sys.exit(f"Fit Profile sign-in failed: {exc}")
+
+    import json as _json
+    ciphertext, key_id = secretbox.encrypt(_json.dumps(blob))
+    with _owner_conn() as conn, conn.cursor() as cur:
+        cur.execute("""INSERT INTO diet.fitprofile_credentials
+                         (user_id, secret_ciphertext, key_id)
+                       VALUES (%s, %s, %s)
+                       ON CONFLICT (user_id) DO UPDATE
+                         SET secret_ciphertext = EXCLUDED.secret_ciphertext,
+                             key_id = EXCLUDED.key_id, updated_at = now()""",
+                    (row["user_id"], ciphertext, key_id))
+        conn.commit()
+    print(f"stored encrypted Fit Profile credentials for {args.email}")
+    print(f"next: `python -m app.poller --only fitprofile --days 60 --user {args.email}` "
+          "to backfill weigh-ins")
+
+
+def cmd_fitprofile_probe(args) -> None:
+    """What the account returns, read through the same parser the poller uses."""
+    from . import fitprofile, secretbox
+
+    with _owner_conn() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT c.secret_ciphertext, c.key_id
+                       FROM diet.fitprofile_credentials c
+                       JOIN auth.users u USING (user_id)
+                       WHERE u.email = lower(%s)""", (args.email,))
+        row = cur.fetchone()
+    if row is None:
+        sys.exit(f"no stored Fit Profile account for {args.email}; "
+                 "run fitprofile-login first")
+    session = fitprofile.resume(secretbox.decrypt(row["secret_ciphertext"], row["key_id"]))
+    since = datetime.now(timezone.utc) - timedelta(days=args.days)
+    try:
+        print("\n".join(fitprofile.probe(session, since)))
+    except fitprofile.FitProfileError as exc:
+        sys.exit(f"Fit Profile: {exc}")
+    if session.refreshed:
+        print("\n(signed in again; the poller will store the new token on its next run)")
+
+
+def cmd_fitprofile_forget(args) -> None:
+    with _owner_conn() as conn, conn.cursor() as cur:
+        cur.execute("""DELETE FROM diet.fitprofile_credentials WHERE user_id =
+                       (SELECT user_id FROM auth.users WHERE email = lower(%s))""",
+                    (args.email,))
+        if cur.rowcount == 0:
+            sys.exit(f"no stored Fit Profile account for {args.email}")
+        conn.commit()
+    print(f"forgot the Fit Profile account for {args.email}; "
+          "weigh-ins already stored are kept")
+
+
 def cmd_garmin_forget(args) -> None:
     with _owner_conn() as conn, conn.cursor() as cur:
         cur.execute("""DELETE FROM diet.garmin_credentials WHERE user_id =
@@ -650,6 +731,24 @@ def main() -> None:
     bf = sub.add_parser("bosch-forget", help="delete stored Bosch tokens")
     bf.add_argument("email")
     bf.set_defaults(fn=cmd_bosch_forget)
+
+    fl = sub.add_parser("fitprofile-login",
+                        help="store an encrypted Fit Profile (GE scale) account")
+    fl.add_argument("email", help="the diet-log account these weigh-ins belong to")
+    fl.add_argument("--fitprofile-email", default=None,
+                    help="the Fit Profile account email, if different; prompted otherwise")
+    fl.set_defaults(fn=cmd_fitprofile_login)
+
+    fpp = sub.add_parser("fitprofile-probe",
+                         help="list recent weigh-ins as the poller would read them")
+    fpp.add_argument("email")
+    fpp.add_argument("--days", type=int, default=7,
+                     help="weigh-ins changed in the last N days (default 7)")
+    fpp.set_defaults(fn=cmd_fitprofile_probe)
+
+    ff = sub.add_parser("fitprofile-forget", help="delete the stored Fit Profile account")
+    ff.add_argument("email")
+    ff.set_defaults(fn=cmd_fitprofile_forget)
 
     gf = sub.add_parser("garmin-forget", help="delete a stored Garmin session")
     gf.add_argument("email")

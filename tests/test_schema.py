@@ -12,9 +12,9 @@ import pytest
 
 # Every table holding user data. Adding one to diet without adding it here is
 # exactly the mistake this test exists to catch.
-USER_TABLES = ["measurements", "activities", "meals", "meal_items",
+USER_TABLES = ["measurements", "activities", "weigh_ins", "meals", "meal_items",
                "sync_state", "garmin_credentials", "bosch_credentials",
-               "targets", "ignored_days"]
+               "fitprofile_credentials", "targets", "ignored_days"]
 
 
 def test_migration_is_idempotent(owner_dsn):
@@ -57,7 +57,8 @@ class TestReadOnlyRole:
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 c.execute("SELECT 1 FROM auth.users")
 
-    @pytest.mark.parametrize("table", ["garmin_credentials", "bosch_credentials"])
+    @pytest.mark.parametrize("table", ["garmin_credentials", "bosch_credentials",
+                                       "fitprofile_credentials"])
     def test_cannot_read_any_stored_credential(self, dsns, table):
         """A credential table is never readable through the model-facing tool,
         whichever connector it belongs to."""
@@ -73,8 +74,8 @@ class TestReadOnlyRole:
                 c.execute("SELECT 1 FROM diet.garmin_credentials")
 
     @pytest.mark.parametrize("table", [
-        "meals", "meal_items", "measurements", "activities", "sync_state",
-        "targets", "ignored_days"])
+        "meals", "meal_items", "measurements", "activities", "weigh_ins",
+        "sync_state", "targets", "ignored_days"])
     def test_can_read_the_tables_the_tool_advertises(self, dsns, table):
         with psycopg.connect(dsns["ro"]) as c:
             c.execute(f"SELECT 1 FROM diet.{table} LIMIT 1")
@@ -184,8 +185,8 @@ class TestProvenance:
     list would never reach a database that already had it. The constraint is
     replaced outright every run instead -- idempotent *and* evolvable."""
 
-    @pytest.mark.parametrize("source", ["garmin", "bosch", "claude-estimate",
-                                        "manual"])
+    @pytest.mark.parametrize("source", ["garmin", "bosch", "fitprofile",
+                                        "claude-estimate", "manual"])
     def test_every_writer_is_accepted(self, owner, user, source):
         owner.execute(
             """INSERT INTO diet.activities
@@ -227,6 +228,37 @@ class TestBoschColumnsAreConstrained:
                 avg_cadence_rpm, avg_rider_power_w, motor_energy_share)
                VALUES (%s, 'bosch', 'ok', now(), 'ebike_ride', 68, 112, 0.667)""",
             (user,))
+
+
+class TestWeighInsAreConstrained:
+    """A scale that misreads, or a parser that takes a 0.0 sentinel at face
+    value, is exactly the plausible-looking wrong number the CHECKs are for."""
+
+    def _insert(self, owner, user, **cols):
+        cols = {"weight_kg": 86.4, **cols}
+        owner.execute(
+            f"""INSERT INTO diet.weigh_ins
+                (user_id, source, external_id, measured_at, {", ".join(cols)})
+                VALUES (%s, 'fitprofile', 'x', now(), {", ".join(["%s"] * len(cols))})""",
+            (user, *cols.values()))
+
+    @pytest.mark.parametrize("column, value", [
+        ("weight_kg", 864.0),
+        ("body_fat_pct", 0),          # "not measured" stored as a measurement
+        ("visceral_fat", 0),
+        ("body_water_pct", 5),
+        ("bmr_kcal", 18190),
+    ])
+    def test_an_implausible_value_is_refused(self, owner, user, column, value):
+        with pytest.raises(psycopg.errors.CheckViolation):
+            self._insert(owner, user, **{column: value})
+
+    def test_a_weight_only_weigh_in_is_accepted(self, owner, user):
+        self._insert(owner, user)
+
+    def test_the_connector_can_record_its_syncs(self, owner, user):
+        owner.execute("INSERT INTO diet.sync_state (user_id, connector) "
+                      "VALUES (%s, 'fitprofile')", (user,))
 
 
 class TestMigratingAnOlderDatabase:

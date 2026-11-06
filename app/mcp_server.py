@@ -216,6 +216,13 @@ def get_day(date: str | None = None) -> dict:
     Activities carry a `source`. Ebike rides come from Bosch and carry no
     calories at all: energy expenditure is the watch's figure, taken as it is.
     See `get_activities`.
+
+    `weigh_ins` lists every step onto the body-composition scale that day, in
+    time order. The one marked `days_weight` is the day's weight: the first
+    weigh-in that measured body fat, else the first. Later ones (after meals,
+    in socks) are kept but are not the day's figure. A NULL body figure means
+    that weigh-in did not measure it, not zero. On a day with a weigh-in, any
+    Garmin `weight_kg` in `measurements` was typed in by hand and is superseded.
     """
     user_id, tz = _identity()
     with db.user_tx(user_id) as cur:
@@ -227,7 +234,16 @@ def get_range(from_date: str | None = None, to_date: str | None = None,
               metrics: list[str] | None = None) -> dict:
     """
     Measured metrics over a date range — weight, resting HR, sleep, steps,
-    calories burned. These come from the fitness tracker and are not estimates.
+    calories burned, and body composition. These come from the fitness tracker
+    and the scale, and are not estimates.
+
+    Body composition (body_fat_pct, bmi, skeletal_muscle_pct, muscle_mass_kg,
+    fat_free_mass_kg, subcutaneous_fat_pct, visceral_fat, body_water_pct,
+    protein_pct, bone_mass_kg, bmr_kcal, metabolic_age) is one value a day, from
+    the day's chosen weigh-in (see `get_day`). On days with a weigh-in, its
+    weight_kg replaces Garmin's; `source` says which one a row came from. The
+    scale's bmr_kcal is a formula from weight and impedance, not a measurement,
+    and is not part of energy expenditure.
 
     Dates are YYYY-MM-DD in the user's timezone; the default range is the last
     14 days. `metrics` defaults to all of them.
@@ -443,10 +459,12 @@ def query_sql(sql: str) -> dict:
     the identity tables at all. Row-level security still applies, so you can
     only ever read this user's rows — write the query as if the tables held
     their data alone. Tables: diet.meals, diet.meal_items, diet.measurements,
-    diet.activities, diet.sync_state, diet.targets, diet.ignored_days. Single
-    SELECT (or WITH) statement, at most 500 rows returned. Note that
-    diet.activities holds one row per instrument, so a ride recorded by both a
-    watch and an ebike is two rows — count outings with care.
+    diet.activities, diet.weigh_ins, diet.sync_state, diet.targets,
+    diet.ignored_days. Single SELECT (or WITH) statement, at most 500 rows
+    returned. Note that diet.activities holds one row per instrument, so a ride
+    recorded by both a watch and an ebike is two rows — count outings with
+    care. diet.weigh_ins holds every weigh-in, often several a day; its `raw`
+    column has the scale's full payload, including segmental (per-limb) figures.
     """
     if not db.ro_pool_ready():
         raise ToolError("ad-hoc SQL is not available on this server "
