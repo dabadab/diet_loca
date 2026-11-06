@@ -37,7 +37,7 @@ const WANTED = ["uncountedKind", "uncountedReason", "uncountedSummary",
                 "avgRow", "bar", "statsBlock", "dayListCard", "renderRollup",
                 "weightSeries", "weightFit", "smoothWeight", "weightRate", "weightGeometry",
                 "chartWidth", "wireWeightChart",
-                "weightChart", "shortDate"];
+                "weightChart", "shortDate", "calendarWeeks"];
 
 globalThis.state = input.state;
 // Enough of an element for the render functions to write into. querySelector

@@ -422,3 +422,28 @@ def test_the_whole_summary_renders_with_a_weight_series():
     chart = page({"days": rows, "target": target}, {"h": ["weightChart"]})["h"]
     assert "<svg" in chart and "Weight" in chart
     assert "a week" in chart
+
+
+class TestWeeks:
+    """The Summary's week cards are calendar weeks, newest at the top."""
+
+    def _weeks(self, dates):
+        return page({"days": []}, {"w": ["calendarWeeks", [day(d) for d in dates]]})["w"]
+
+    def test_weeks_run_monday_to_sunday_newest_first(self):
+        # 2026-09-10 is a Thursday; 2026-09-27 a Sunday.
+        weeks = self._weeks(list(reversed(days_from("2026-09-10", 18))))
+        assert [(w["monday"], w["sunday"]) for w in weeks] == [
+            ("2026-09-21", "2026-09-27"),
+            ("2026-09-14", "2026-09-20"),
+            ("2026-09-07", "2026-09-13"),
+        ]
+        assert [d["date"] for d in weeks[2]["days"]] == days_from("2026-09-10", 4)
+        assert len(weeks[0]["days"]) == 7
+
+    def test_a_skipped_day_does_not_shift_the_weeks(self):
+        """Chunking by seven pulled the next Monday into the previous week."""
+        dates = [d for d in days_from("2026-09-14", 14) if d != "2026-09-16"]
+        weeks = self._weeks(dates)
+        assert [w["monday"] for w in weeks] == ["2026-09-21", "2026-09-14"]
+        assert [len(w["days"]) for w in weeks] == [7, 6]

@@ -1080,6 +1080,27 @@ function statsBlock(st) {
       </div>` : ""}`;
 }
 
+// Calendar weeks, Monday to Sunday, newest first. Chunking the counted days
+// seven at a time drifted off the calendar as soon as one day was skipped, so a
+// "week" could run Thursday to Friday and mean nothing anyone remembers.
+// Days are grouped oldest-first inside each week, as the weight line reads.
+function calendarWeeks(days) {
+  const DAY = 86400000;
+  const byMonday = new Map();
+  for (const d of days) {
+    const t = Date.parse(d.date + "T00:00:00Z");
+    const back = (new Date(t).getUTCDay() + 6) % 7;  // Monday = 0
+    const monday = new Date(t - back * DAY).toISOString().slice(0, 10);
+    if (!byMonday.has(monday)) byMonday.set(monday, []);
+    byMonday.get(monday).push(d);
+  }
+  return [...byMonday.keys()].sort().reverse().map((monday) => ({
+    monday,
+    sunday: new Date(Date.parse(monday + "T00:00:00Z") + 6 * DAY).toISOString().slice(0, 10),
+    days: byMonday.get(monday).sort((a, b) => a.date.localeCompare(b.date)),
+  }));
+}
+
 function renderRollup() {
   const box = el("rollupView");
   // Today is a partial day: dinner is not eaten yet and Garmin has not finished
@@ -1097,18 +1118,14 @@ function renderRollup() {
         : "Nothing recorded yet."}</div></div>`;
     return;
   }
-  const asc = [...recorded].reverse();
-  const weeks = [];
-  for (let i = 0; i < asc.length; i += 7) weeks.push(asc.slice(i, i + 7));
-
-  const weekCards = weeks.map((week, wi) => {
+  const weekCards = calendarWeeks(recorded).map(({ monday, sunday, days: week }) => {
     const st = statsFor(week);
     const weights = week.filter((d) => d.weight_kg != null);
     return `
       <div class="block-card">
         <div class="block-title">
-          <h2>Week ${wi + 1}</h2>
-          <span class="sub">${week[0].date} – ${week[week.length - 1].date} · ${st.n} day${st.n === 1 ? "" : "s"}</span>
+          <h2>${shortDate(monday)} – ${shortDate(sunday)}</h2>
+          <span class="sub">${monday} – ${sunday} · ${st.n} day${st.n === 1 ? "" : "s"} counted</span>
         </div>
         ${statsBlock(st)}
         ${weights.length >= 2 ? `<div class="avg-line" style="margin-top:8px">
