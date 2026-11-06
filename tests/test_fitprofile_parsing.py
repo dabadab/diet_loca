@@ -193,3 +193,38 @@ class TestSession:
         s = fitprofile.Session({"token": "old", "user_id": "42", "expires_at": 0})
         with pytest.raises(fitprofile.NeedsLogin):
             s.get("x", {})
+
+
+class TestRequest:
+    """_request is the one place that builds HTTP; these run it through httpx's
+    own request validation with the network replaced."""
+
+    def _capture(self, monkeypatch):
+        import httpx2
+        sent = []
+
+        def fake_send(self, request, **kw):
+            sent.append(request)
+            return httpx2.Response(200, json={"code": "200", "msg": "ok",
+                                              "data": fitprofile.encrypt("{}")},
+                                   request=request)
+        monkeypatch.setattr(httpx2.Client, "send", fake_send)
+        return sent
+
+    def test_sign_in_goes_out_without_an_authorization_header(self, monkeypatch):
+        """The first version sent "Bearer " with an empty token, which httpx
+        refuses as an illegal header -- so the sign-in never left the machine."""
+        sent = self._capture(monkeypatch)
+        fitprofile._request("POST", fitprofile.SIGN_IN_PATH, {"email": "e"})
+        assert "authorization" not in sent[0].headers
+        body = json.loads(sent[0].content)
+        assert json.loads(fitprofile.decrypt(body["ciphertext"])) == {"email": "e"}
+
+    def test_a_listing_carries_the_token_and_encrypted_params(self, monkeypatch):
+        sent = self._capture(monkeypatch)
+        fitprofile._request("GET", fitprofile.LIST_PATH, {"user_id": "42"}, "tok")
+        req = sent[0]
+        assert req.headers["authorization"] == "Bearer tok"
+        assert req.url.params["app_id"] == "fit_profile"
+        assert json.loads(fitprofile.decrypt(req.url.params["ciphertext"])) == {
+            "user_id": "42"}

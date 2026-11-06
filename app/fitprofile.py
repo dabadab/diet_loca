@@ -159,7 +159,9 @@ def unwrap(reply: Any) -> dict:
 def _request(method: str, path: str, params: dict, token: str = "") -> dict:
     import httpx2 as httpx
     url = API_BASE + path.lstrip("/")
-    headers = {"Authorization": f"Bearer {token}"}
+    # No header at all before sign-in: "Bearer " with nothing after it is an
+    # illegal header value to httpx, which refuses to send the request.
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
     query = dict(PUBLIC_PARAMS)
     body = None
     if method == "GET":
