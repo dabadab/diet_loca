@@ -306,3 +306,81 @@ def days_back(today: date_cls, n: int) -> Iterable[date_cls]:
     from datetime import timedelta
     for i in range(n):
         yield today - timedelta(days=i)
+
+
+# --- pushing weigh-ins -------------------------------------------------------
+#
+# The one write this connector makes. The GE scale's weigh-ins come in through
+# Fit Profile (fitprofile.py); the day's first full one is sent on to Garmin as
+# a body-composition entry, so Garmin's own weight and body-fat charts carry the
+# scale's figures instead of a number typed in by hand.
+#
+# It is the library's add_body_composition() taken apart, for two reasons:
+#
+#   * **The timestamp.** add_body_composition() takes an ISO string, and the
+#     FIT encoder turns a datetime into seconds with time.mktime(), which reads
+#     the wall-clock fields in the *process's* timezone and ignores the tzinfo.
+#     In a UTC container a Budapest weigh-in would land an hour or two off. The
+#     encoder takes epoch seconds as they are, so it is given those.
+#   * **The arithmetic.** The encoder scales each value and truncates it with
+#     int(): 0.29 * 100 is 28.999…, which becomes 28. Postgres hands back
+#     Decimals, which scale exactly, so they are passed through untouched.
+#
+# The file_id's creation time is the weigh-in's own time rather than "now", so
+# the same weigh-in always makes the same file.
+
+
+def body_composition(row: dict) -> dict[str, Any]:
+    """FIT weight_scale fields for one stored weigh-in (a diet.weigh_ins row).
+
+    Garmin's "muscle mass" is *skeletal* muscle mass -- what its own Index
+    scales report -- so it is derived from the scale's skeletal-muscle
+    percentage. The scale's `muscle_mass_kg` is all soft lean tissue, water
+    included, and shown as skeletal muscle it would read about 72 % of body
+    weight. Fat-free mass, subcutaneous fat, protein and the per-limb figures
+    have no field in the message and are not sent.
+    """
+    weight = row["weight_kg"]
+    skeletal = row.get("skeletal_muscle_pct")
+    return {
+        "weight": weight,
+        "percent_fat": row.get("body_fat_pct"),
+        "percent_hydration": row.get("body_water_pct"),
+        "bone_mass": row.get("bone_mass_kg"),
+        "muscle_mass": (None if skeletal is None
+                        else round(weight * skeletal / 100, 2)),
+        "basal_met": row.get("bmr_kcal"),
+        "metabolic_age": row.get("metabolic_age"),
+        "visceral_fat_rating": row.get("visceral_fat"),
+        "bmi": row.get("bmi"),
+    }
+
+
+def body_composition_fit(row: dict) -> bytes:
+    """One weigh-in as a FIT weight-scale file, ready to upload."""
+    from garminconnect.fit import FitEncoderWeight
+    at = row["measured_at"].timestamp()          # epoch seconds; see above
+    enc = FitEncoderWeight()
+    enc.write_file_info(time_created=at)
+    enc.write_file_creator()
+    enc.write_device_info(at)
+    enc.write_weight_scale(at, **body_composition(row))
+    enc.finish()
+    return enc.getvalue()
+
+
+def upload_weigh_in(api: Any, row: dict) -> bool:
+    """
+    Send one weigh-in to Garmin. True if Garmin took it, False if it said it
+    already had that file (409), which is as good as taken. Anything else
+    raises.
+    """
+    files = {"file": ("body_composition.fit", body_composition_fit(row))}
+    try:
+        api.client.post("connectapi", api.garmin_connect_upload,
+                        files=files, api=True)
+    except Exception as exc:
+        if "409" in str(exc):
+            return False
+        raise
+    return True

@@ -312,6 +312,62 @@ class RateLimited(RuntimeError):
     """Garmin asked us to stop. Distinct so the loop can back off rather than retry."""
 
 
+# The day's first *full* weigh-in -- one that measured body composition, which
+# for this scale means every figure is there -- for each day in the window that
+# has not had one sent yet. "Not sent yet" is per day, not per weigh-in, so a
+# day is sent once even if an earlier full reading turns up later (the scale
+# holds readings while the phone is away) or the sent one is deleted in the app.
+# A day with only weight-only readings sends nothing.
+PUSH_CANDIDATES_SQL = """
+SELECT f.* FROM (
+    SELECT DISTINCT ON (local_date) *
+    FROM diet.weigh_ins
+    WHERE body_fat_pct IS NOT NULL AND local_date >= %(since)s
+    ORDER BY local_date, measured_at
+) f
+WHERE NOT EXISTS (SELECT 1 FROM diet.weigh_ins w
+                  WHERE w.local_date = f.local_date
+                    AND w.garmin_pushed_at IS NOT NULL)
+ORDER BY f.local_date"""
+
+
+def push_weigh_ins(api, account: dict, since: date) -> tuple[int, list[str]]:
+    """
+    Send each day's first full weigh-in since `since` to Garmin. Returns
+    (sent, failures).
+
+    Runs inside the Garmin pass, under its claim and on its session, so it
+    costs no second sign-in and cannot race the web button. Costs nothing at
+    all when there is nothing to send, which is most cycles. Each weigh-in is
+    marked as soon as Garmin has it, so a rate limit halfway through does not
+    send the first ones again next time.
+    """
+    user_id = account["user_id"]
+    with db.user_tx(user_id) as cur:
+        cur.execute(PUSH_CANDIDATES_SQL, {"since": since})
+        rows = cur.fetchall()
+    sent, failures = 0, []
+    for row in rows:
+        try:
+            fresh = garmin.upload_weigh_in(api, row)
+        except Exception as exc:
+            if garmin.is_rate_limited(exc):
+                raise RateLimited(str(exc)) from exc
+            # Left unmarked, so the next pass tries again while the day is
+            # still inside the window.
+            failures.append(f"push {row['local_date']}: "
+                            f"{type(exc).__name__}: {exc}"[:200])
+            continue
+        with db.user_tx(user_id) as cur:
+            cur.execute("""UPDATE diet.weigh_ins SET garmin_pushed_at = now()
+                           WHERE weigh_in_id = %s""", (row["weigh_in_id"],))
+        sent += 1
+        log.info("garmin: %s weigh-in of %s (%s kg) %s", account["email"],
+                 row["local_date"], row["weight_kg"],
+                 "sent" if fresh else "was already there")
+    return sent, failures
+
+
 def poll_user(account: dict, days: int,
               raw_root: Path | None) -> tuple[int, int, list[str]]:
     user_id = account["user_id"]
@@ -326,7 +382,12 @@ def poll_user(account: dict, days: int,
         raise
     total, rejected = 0, []
     today = datetime.now(tz).date()
+    start = today - timedelta(days=max(days - 1, 0))
     raw_dir = (raw_root / account["email"]) if raw_root else None
+
+    # Before the reads, so today's fetch can already see the weight just sent.
+    _, push_failures = push_weigh_ins(api, account, start)
+    rejected.extend(push_failures)
 
     for day in garmin.days_back(today, days):
         daily, sleep = garmin.fetch_day(api, day, raw_dir)
@@ -346,7 +407,6 @@ def poll_user(account: dict, days: int,
         rejected.extend(f"{day}: {b}" for b in bad)
 
     # One request for the whole window, however many activities are in it.
-    start = today - timedelta(days=max(days - 1, 0))
     try:
         items = garmin.fetch_activities(api, start, today, raw_dir)
     except Exception as exc:
@@ -483,7 +543,10 @@ def run_once(settings, args, raw_root: Path | None, days: int | None = None,
 
     Fit Profile, by contrast, runs on both cycles: a morning weigh-in is the
     one reading someone wants to see straight away, and asking for "what
-    changed today" is a single request.
+    changed today" is a single request. It also runs *first*, because the
+    Garmin pass sends the day's first full weigh-in on to Garmin
+    (push_weigh_ins), and a weigh-in that arrives in this cycle should go out
+    in this cycle rather than the next.
     """
     window = args.days if days is None else days
     prune_raw(raw_root, args.keep_raw_days)
@@ -507,6 +570,41 @@ def run_once(settings, args, raw_root: Path | None, days: int | None = None,
     failures = 0
     rate_limited = False
     try:
+        for account in scale_accounts:
+            email = account["email"]
+            try:
+                if not claim(account["user_id"], connector="fitprofile"):
+                    log.info("fitprofile: %s skipped, a sync is already in flight",
+                             email)
+                    continue
+                stored, removed, rejected = poll_fitprofile(account, window, raw_root)
+                _record(account["user_id"], ok=True, error=None,
+                        connector="fitprofile")
+                log.info("fitprofile: %s stored %d weigh-in(s), deleted %d, "
+                         "over %d day(s)%s", email, stored, removed, window,
+                         f", {len(rejected)} rejected: {'; '.join(rejected[:4])}"
+                         if rejected else "")
+            except RateLimited as exc:
+                failures += 1
+                rate_limited = True
+                message = f"Fit Profile rate-limited this client: {exc}"[:400]
+                log.error("fitprofile: %s %s", email, message)
+                _try_record(account["user_id"], message, "fitprofile")
+            except fitprofile.NeedsLogin as exc:
+                # The stored password no longer signs in -- changed in the app,
+                # most likely. Retrying it every quarter hour would only look
+                # like someone guessing, so say which command fixes it.
+                failures += 1
+                message = (f"Fit Profile sign-in failed; run "
+                           f"`manage.py fitprofile-login {email}`: {exc}")[:400]
+                log.error("fitprofile: %s", message)
+                _try_record(account["user_id"], message, "fitprofile")
+            except Exception as exc:
+                failures += 1
+                message = f"{type(exc).__name__}: {exc}"[:400]
+                log.error("fitprofile: %s failed: %s", email, message)
+                _try_record(account["user_id"], message, "fitprofile")
+
         for account in accounts:
             email = account["email"]
             try:
@@ -570,40 +668,6 @@ def run_once(settings, args, raw_root: Path | None, days: int | None = None,
                 log.error("bosch: %s failed: %s", email, message)
                 _try_record(account["user_id"], message, "bosch")
 
-        for account in scale_accounts:
-            email = account["email"]
-            try:
-                if not claim(account["user_id"], connector="fitprofile"):
-                    log.info("fitprofile: %s skipped, a sync is already in flight",
-                             email)
-                    continue
-                stored, removed, rejected = poll_fitprofile(account, window, raw_root)
-                _record(account["user_id"], ok=True, error=None,
-                        connector="fitprofile")
-                log.info("fitprofile: %s stored %d weigh-in(s), deleted %d, "
-                         "over %d day(s)%s", email, stored, removed, window,
-                         f", {len(rejected)} rejected: {'; '.join(rejected[:4])}"
-                         if rejected else "")
-            except RateLimited as exc:
-                failures += 1
-                rate_limited = True
-                message = f"Fit Profile rate-limited this client: {exc}"[:400]
-                log.error("fitprofile: %s %s", email, message)
-                _try_record(account["user_id"], message, "fitprofile")
-            except fitprofile.NeedsLogin as exc:
-                # The stored password no longer signs in -- changed in the app,
-                # most likely. Retrying it every quarter hour would only look
-                # like someone guessing, so say which command fixes it.
-                failures += 1
-                message = (f"Fit Profile sign-in failed; run "
-                           f"`manage.py fitprofile-login {email}`: {exc}")[:400]
-                log.error("fitprofile: %s", message)
-                _try_record(account["user_id"], message, "fitprofile")
-            except Exception as exc:
-                failures += 1
-                message = f"{type(exc).__name__}: {exc}"[:400]
-                log.error("fitprofile: %s failed: %s", email, message)
-                _try_record(account["user_id"], message, "fitprofile")
     finally:
         db.close_pool()
 

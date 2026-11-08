@@ -20,9 +20,9 @@ fixtures create and drop databases.
 
 | file | needs | what it is for |
 |---|---|---|
-| `test_garmin_parsing.py` | nothing | Garmin's shape is not a contract. A missing field must yield nothing, never a guess. |
+| `test_garmin_parsing.py` | nothing | Garmin's shape is not a contract. A missing field must yield nothing, never a guess. The weigh-in sent to Garmin is checked byte for byte. |
 | `test_schema.py` | database | RLS is the entire tenant boundary; the CHECKs are the only thing between a plausible wrong number and the record. |
-| `test_poller.py` | database | Every ingest path, with the network seam faked at `garmin.fetch_*`, the Bosch session and the Fit Profile session. |
+| `test_poller.py` | database | Every ingest path, with the network seam faked at `garmin.fetch_*`, the Bosch session and the Fit Profile session — plus which weigh-in is sent on to Garmin, and that each day goes once. |
 | `test_bosch_parsing.py` | nothing | Bosch publishes no schema at all; these pin the behaviour that holds whatever the field names turn out to be. |
 | `test_fitprofile_parsing.py` | nothing | Fit Profile's cipher is pinned to bytes the real server sent; a 0.0 the scale sends for "not measured" must never become a reading. |
 | `test_activity_matching.py` | database | One outing seen by two instruments: what counts as the same ride, and which rows the day's energy already contains. |

@@ -164,3 +164,86 @@ class TestRateLimitDetection:
 def test_days_back_is_newest_first_and_inclusive():
     assert list(garmin.days_back(date(2026, 9, 14), 3)) == [
         date(2026, 9, 14), date(2026, 9, 13), date(2026, 9, 12)]
+
+
+# ------------------------------------------------------- pushing weigh-ins ---
+
+from decimal import Decimal
+from struct import pack
+
+# Shaped like a diet.weigh_ins row: Postgres numerics arrive as Decimal.
+FULL_WEIGH_IN = {
+    "measured_at": datetime(2026, 11, 8, 8, 36, 41, tzinfo=timezone.utc),
+    "weight_kg": Decimal("86.40"), "body_fat_pct": Decimal("22.6"),
+    "body_water_pct": Decimal("56.8"), "bone_mass_kg": Decimal("4.29"),
+    "skeletal_muscle_pct": Decimal("44.8"), "muscle_mass_kg": Decimal("62.47"),
+    "bmr_kcal": Decimal("1815"), "metabolic_age": Decimal("51"),
+    "visceral_fat": Decimal("6.0"), "bmi": Decimal("27.9"),
+}
+FIT_EPOCH = 631065600
+
+
+class TestBodyComposition:
+    def test_garmins_muscle_mass_is_the_skeletal_share_not_all_lean_tissue(self):
+        """Garmin labels the field skeletal muscle mass. The scale's 62 kg of
+        muscle would read there as 72 % of body weight."""
+        fields = garmin.body_composition(FULL_WEIGH_IN)
+        assert fields["muscle_mass"] == Decimal("38.71")      # 86.40 * 44.8 %
+        assert fields["weight"] == Decimal("86.40")
+        assert fields["percent_fat"] == Decimal("22.6")
+        assert fields["percent_hydration"] == Decimal("56.8")
+        assert fields["basal_met"] == Decimal("1815")
+        assert fields["visceral_fat_rating"] == Decimal("6.0")
+
+    def test_a_figure_the_scale_did_not_take_is_not_sent(self):
+        fields = garmin.body_composition({**FULL_WEIGH_IN, "skeletal_muscle_pct": None,
+                                          "bone_mass_kg": None})
+        assert fields["muscle_mass"] is None and fields["bone_mass"] is None
+
+    def test_the_file_carries_the_weigh_ins_own_instant_exactly(self):
+        """The library's own path reads the time in the process's timezone and
+        truncates scaled floats (4.29 kg of bone became 4.28). The record is
+        checked byte for byte: timestamp, then weight, fat, water, visceral
+        fat mass (not sent), bone, muscle."""
+        data = garmin.body_composition_fit(FULL_WEIGH_IN)
+        ts = int(FULL_WEIGH_IN["measured_at"].timestamp()) - FIT_EPOCH
+        assert pack("<IHHHHHH", ts, 8640, 2260, 5680, 0xFFFF, 429, 3871) in data
+
+    def test_the_same_weigh_in_always_makes_the_same_file(self):
+        assert (garmin.body_composition_fit(FULL_WEIGH_IN)
+                == garmin.body_composition_fit(dict(FULL_WEIGH_IN)))
+
+
+class TestUploadWeighIn:
+    class Client:
+        def __init__(self, fail=None):
+            self.fail, self.posts = fail, []
+
+        def post(self, domain, path, **kw):
+            self.posts.append((path, kw))
+            if self.fail:
+                raise self.fail
+            return {}
+
+    class Api:
+        garmin_connect_upload = "/upload-service/upload"
+
+        def __init__(self, client):
+            self.client = client
+
+    def test_it_is_uploaded_as_a_fit_file(self):
+        client = self.Client()
+        assert garmin.upload_weigh_in(self.Api(client), FULL_WEIGH_IN) is True
+        path, kw = client.posts[0]
+        assert path == "/upload-service/upload"
+        name, data = kw["files"]["file"]
+        assert name.endswith(".fit") and data[8:12] == b".FIT"
+
+    def test_a_duplicate_counts_as_delivered(self):
+        client = self.Client(RuntimeError("API Error 409 - Duplicate"))
+        assert garmin.upload_weigh_in(self.Api(client), FULL_WEIGH_IN) is False
+
+    def test_any_other_error_is_raised(self):
+        client = self.Client(RuntimeError("API Error 500"))
+        with pytest.raises(RuntimeError):
+            garmin.upload_weigh_in(self.Api(client), FULL_WEIGH_IN)

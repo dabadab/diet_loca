@@ -577,6 +577,12 @@ CREATE TABLE IF NOT EXISTS diet.weigh_ins (
 CREATE INDEX IF NOT EXISTS weigh_ins_lookup_idx
   ON diet.weigh_ins (user_id, local_date DESC, measured_at);
 
+-- When this weigh-in was uploaded to Garmin Connect as a body-composition
+-- entry, or NULL. Only the day's first full weigh-in is ever sent, and a day
+-- with any weigh-in marked here is never sent again (poller.push_weigh_ins).
+-- Added after the table, so a database that predates it gains it here.
+ALTER TABLE diet.weigh_ins ADD COLUMN IF NOT EXISTS garmin_pushed_at timestamptz;
+
 -- Named and replaced rather than inline, as for the Bosch columns, so a later
 -- change to a range reaches a database that already has the table.
 DO $wi$

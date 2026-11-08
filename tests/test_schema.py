@@ -279,6 +279,7 @@ class TestMigratingAnOlderDatabase:
             owner.execute(f"ALTER TABLE diet.activities DROP CONSTRAINT {name}")
         for col in ("avg_cadence_rpm", "avg_rider_power_w", "motor_energy_share"):
             owner.execute(f"ALTER TABLE diet.activities DROP COLUMN {col}")
+        owner.execute("ALTER TABLE diet.weigh_ins DROP COLUMN garmin_pushed_at")
         owner.execute("DROP TABLE diet.bosch_credentials")
         owner.execute("ALTER TABLE diet.sync_state "
                       "DROP CONSTRAINT sync_state_connector_check")
@@ -345,6 +346,13 @@ class TestMigratingAnOlderDatabase:
         self._migrate(owner_dsn)
         owner.execute("INSERT INTO diet.sync_state (user_id, connector) "
                       "VALUES (%s, 'bosch')", (user,))
+
+    def test_weigh_ins_gain_the_garmin_push_marker(self, owner, owner_dsn):
+        """Added to a table production already had, so the poller's push does
+        not fail its first pass on a missing column."""
+        self._make_it_old(owner)
+        self._migrate(owner_dsn)
+        owner.execute("SELECT garmin_pushed_at FROM diet.weigh_ins")
 
     def test_migrating_twice_changes_nothing(self, owner, owner_dsn):
         self._make_it_old(owner)

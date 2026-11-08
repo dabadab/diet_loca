@@ -644,6 +644,46 @@ unchanged in shape: it carries `weight_kg`, now resolved by this rule.
 The scale's `bmr` is a formula from weight and impedance, not a measurement; it
 is stored and served, and kept out of energy expenditure.
 
+### Sent on to Garmin
+
+The connector's one write. Each day's **first full weigh-in** — the first with
+body composition, which with this scale means every figure is present; the
+weight-only ones in socks never are — is uploaded to Garmin Connect as a FIT
+weight-scale file, the same thing a Garmin Index scale sends, so Garmin's
+weight and body-fat charts carry the scale's figures. A day with only
+weight-only readings sends nothing. The user asked for exactly this rule
+(8 Nov 2026), and it is deliberately not the display rule's fallback.
+
+- **Where it runs.** `poller.push_weigh_ins`, at the start of the Garmin pass
+  (`poll_user`), on that pass's session and under its claim: no second sign-in,
+  no race with the web button, and no request at all when there is nothing to
+  send. The Fit Profile pass now runs *before* the Garmin pass, so a weigh-in
+  fetched in a cycle goes out in the same cycle.
+- **Once per day, not per weigh-in.** `diet.weigh_ins.garmin_pushed_at` marks
+  what was sent, and a day with any marked weigh-in is never sent again — not
+  when an earlier full reading turns up later, not when the sent one is deleted
+  in the app. Each is marked as soon as Garmin takes it, so a rate limit halfway
+  through does not resend the first ones. A failed upload stays unmarked and is
+  retried on later passes while its day is inside the window.
+- **Only inside the poll window.** The short cycle sends today, the long one
+  the last three days. A `--days 60` backfill *would* send 60 days, onto days
+  that already carry a hand-typed Garmin weight — which Garmin then averages.
+- **Not `add_body_composition()`, though built from its parts**
+  (`garmin.body_composition_fit`). The library's encoder turns a datetime into
+  seconds with `time.mktime`, in the process's timezone, ignoring tzinfo; it is
+  handed epoch seconds instead. It also truncates scaled values with `int()`,
+  so 4.29 kg became 4.28; Postgres Decimals scale exactly and are passed as
+  they are. A 409 from the upload service counts as already delivered.
+- **Field mapping.** weight, body fat %, body water %, bone mass, BMR, metabolic
+  age, visceral fat (as Garmin's rating) and BMI go straight across. Garmin's
+  muscle mass is *skeletal* muscle mass, so it is `weight × skeletal_muscle_pct`;
+  the scale's `muscle_mass_kg` is all soft lean tissue and would read as ~72 %
+  of body weight there. Fat-free mass, subcutaneous fat, protein and the
+  per-limb figures have no field and stay here.
+- **It comes back.** The Garmin pass reads Garmin's daily weight and, now,
+  body fat into `diet.measurements`. That is harmless: on a day with a weigh-in
+  the scale's own figures win (`_scale_day_sql`).
+
 ## The weight chart
 
 On the Summary tab, over the same window as everything else there: since the

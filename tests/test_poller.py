@@ -541,3 +541,147 @@ class TestWeighIns:
         fake_scale(FakeScale([weigh_in("1", _NOW, 86.4)]))
         poller.poll_fitprofile(scale_account, 1, None)
         assert stored_weigh_ins(pool, other_user) == []
+
+
+# ------------------------------------------- weigh-ins sent on to Garmin ---
+
+_TZ = ZoneInfo("Europe/Budapest")
+
+
+def _at(day, hh, mm=0):
+    return dt.datetime.combine(day, dt.time(hh, mm), tzinfo=_TZ)
+
+
+def add_weigh_in(pool, user, mid, at, weight, full=True):
+    """Straight into the table: what is under test is the choice of what to
+    send, not the Fit Profile parsing that put it there."""
+    body = (dict(body_fat_pct=22.4, skeletal_muscle_pct=44.9, body_water_pct=56.9,
+                 bone_mass_kg=4.41, bmr_kcal=1819, metabolic_age=51,
+                 visceral_fat=6.0) if full else
+            dict(body_fat_pct=None, skeletal_muscle_pct=None, body_water_pct=None,
+                 bone_mass_kg=None, bmr_kcal=None, metabolic_age=None,
+                 visceral_fat=None))
+    with pool.user_tx(user) as cur:
+        cur.execute("""
+            INSERT INTO diet.weigh_ins
+              (user_id, source, external_id, measured_at, weight_kg, bmi,
+               body_fat_pct, skeletal_muscle_pct, body_water_pct, bone_mass_kg,
+               bmr_kcal, metabolic_age, visceral_fat)
+            VALUES (diet.current_user_id(), 'fitprofile', %(mid)s, %(at)s,
+                    %(weight)s, 27.9, %(body_fat_pct)s, %(skeletal_muscle_pct)s,
+                    %(body_water_pct)s, %(bone_mass_kg)s, %(bmr_kcal)s,
+                    %(metabolic_age)s, %(visceral_fat)s)""",
+                    {"mid": mid, "at": at, "weight": weight, **body})
+
+
+def pushed_ids(pool, user):
+    with pool.user_tx(user) as cur:
+        return [r["external_id"] for r in cur.execute(
+            """SELECT external_id FROM diet.weigh_ins
+               WHERE garmin_pushed_at IS NOT NULL ORDER BY measured_at""")]
+
+
+@pytest.fixture
+def uploads(monkeypatch):
+    """Every weigh-in handed to Garmin, in order. Set `.fail` to make the next
+    upload raise instead."""
+    class Recorder(list):
+        fail = None
+    sent = Recorder()
+
+    def upload(api, row):
+        if sent.fail:
+            exc, sent.fail = sent.fail, None
+            raise exc
+        sent.append(row["external_id"])
+        return True
+    monkeypatch.setattr(garmin, "upload_weigh_in", upload)
+    return sent
+
+
+class TestPushWeighIns:
+    def test_the_days_first_full_weigh_in_is_sent_and_nothing_else(
+            self, account, fake_garmin, pool, uploads):
+        """The socks-on reading just past midnight comes first but has no body
+        composition; the evening one is full but noisy. Only the morning one
+        goes to Garmin."""
+        today = dt.datetime.now(_TZ).date()
+        user = account["user_id"]
+        add_weigh_in(pool, user, "midnight", _at(today, 0, 5), 86.9, full=False)
+        add_weigh_in(pool, user, "morning", _at(today, 0, 30), 86.4)
+        add_weigh_in(pool, user, "evening", _at(today, 0, 50), 87.2)
+        fake_garmin(FakeApi())
+        _, _, rejected = poller.poll_user(account, 1, None)
+        assert uploads == ["morning"] and rejected == []
+        assert pushed_ids(pool, user) == ["morning"]
+
+    def test_a_day_is_sent_once(self, account, fake_garmin, pool, uploads):
+        """Including when an earlier full reading turns up later -- the scale
+        holds readings while the phone is away. Garmin already has that day."""
+        today = dt.datetime.now(_TZ).date()
+        user = account["user_id"]
+        add_weigh_in(pool, user, "later", _at(today, 0, 40), 86.4)
+        fake_garmin(FakeApi())
+        poller.poll_user(account, 1, None)
+        add_weigh_in(pool, user, "earlier", _at(today, 0, 10), 86.5)
+        poller.poll_user(account, 1, None)
+        assert uploads == ["later"]
+
+    def test_a_day_with_only_weight_only_readings_sends_nothing(
+            self, account, fake_garmin, pool, uploads):
+        today = dt.datetime.now(_TZ).date()
+        add_weigh_in(pool, account["user_id"], "socks", _at(today, 0, 5), 86.9,
+                     full=False)
+        fake_garmin(FakeApi())
+        poller.poll_user(account, 1, None)
+        assert uploads == []
+
+    def test_only_days_inside_the_window_are_sent(
+            self, account, fake_garmin, pool, uploads):
+        """The short cycle must not reach back and send last month's weigh-ins,
+        many of which Garmin already has, typed in by hand."""
+        today = dt.datetime.now(_TZ).date()
+        user = account["user_id"]
+        add_weigh_in(pool, user, "old", _at(today - dt.timedelta(days=5), 7), 87.0)
+        add_weigh_in(pool, user, "yesterday", _at(today - dt.timedelta(days=1), 7), 86.6)
+        add_weigh_in(pool, user, "today", _at(today, 0, 30), 86.4)
+        fake_garmin(FakeApi())
+        poller.poll_user(account, 2, None)
+        assert uploads == ["yesterday", "today"]
+
+    def test_a_failed_upload_is_reported_and_retried_next_time(
+            self, account, fake_garmin, pool, uploads):
+        today = dt.datetime.now(_TZ).date()
+        user = account["user_id"]
+        add_weigh_in(pool, user, "morning", _at(today, 0, 30), 86.4)
+        fake_garmin(FakeApi())
+        uploads.fail = RuntimeError("API Error 500")
+        _, _, rejected = poller.poll_user(account, 1, None)
+        assert len(rejected) == 1 and "API Error 500" in rejected[0]
+        assert pushed_ids(pool, user) == []
+        poller.poll_user(account, 1, None)
+        assert pushed_ids(pool, user) == ["morning"]
+
+    def test_a_rate_limit_stops_the_pass_but_keeps_what_was_sent(
+            self, account, fake_garmin, pool, uploads, monkeypatch):
+        today = dt.datetime.now(_TZ).date()
+        user = account["user_id"]
+        add_weigh_in(pool, user, "yesterday", _at(today - dt.timedelta(days=1), 7), 86.6)
+        add_weigh_in(pool, user, "today", _at(today, 0, 30), 86.4)
+        fake_garmin(FakeApi())
+        real = garmin.upload_weigh_in
+
+        def second_one_429s(api, row):
+            if row["external_id"] == "today":
+                raise RuntimeError("429 Too Many Requests")
+            return real(api, row)
+        monkeypatch.setattr(garmin, "upload_weigh_in", second_one_429s)
+        with pytest.raises(poller.RateLimited):
+            poller.poll_user(account, 2, None)
+        assert pushed_ids(pool, user) == ["yesterday"]
+
+    def test_nothing_to_send_costs_no_request(self, account, fake_garmin, pool):
+        """FakeApi raises on any call nobody provided for, upload included."""
+        fake_garmin(FakeApi())
+        _, _, rejected = poller.poll_user(account, 1, None)
+        assert rejected == []
