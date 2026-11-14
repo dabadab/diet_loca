@@ -617,13 +617,19 @@ def poll_methreesixty(account: dict, days: int,
                            WHERE source = 'methreesixty'""")
             have = {r["external_id"] for r in cur.fetchall()}
 
-        rows = []
-        for scan in complete:
-            sid = str(scan["id"])
+        def wanted(scan) -> bool:
             when = datetime.fromisoformat(str(scan.get("date", "")).replace("Z", "+00:00")) \
                 if scan.get("date") else None
-            if sid in have and (when is None or when < since):
-                continue
+            return str(scan["id"]) not in have or (when is not None and when >= since)
+
+        todo = [s for s in complete if wanted(s)]
+        # "stored 0" alone cannot tell "nothing new" from "nothing found".
+        log.info("methreesixty: %s has %d scan(s), %d finished, %d already stored; "
+                 "fetching measures for %d", account["email"], len(scans),
+                 len(complete), len(have), len(todo))
+        rows = []
+        for scan in todo:
+            sid = str(scan["id"])
             try:
                 payload = methreesixty.fetch_measures(session, sid)
             except methreesixty.RateLimited as exc:
