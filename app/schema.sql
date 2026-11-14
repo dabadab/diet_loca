@@ -725,6 +725,16 @@ CREATE TABLE IF NOT EXISTS diet.fitprofile_credentials (
   updated_at        timestamptz NOT NULL DEFAULT now()
 );
 
+-- MeThreeSixty (Size Stream body scans): Cognito tokens from a Google sign-in,
+-- plus the short-lived AWS keys and ids derived from them. Same shape and the
+-- same encryption as the others; app/methreesixty.py explains the chain.
+CREATE TABLE IF NOT EXISTS diet.methreesixty_credentials (
+  user_id           uuid PRIMARY KEY REFERENCES auth.users(user_id) ON DELETE CASCADE,
+  secret_ciphertext bytea NOT NULL,
+  key_id            text NOT NULL,
+  updated_at        timestamptz NOT NULL DEFAULT now()
+);
+
 -- -------------------------------------------------------------- targets ---
 -- Effective-dated, not a single current value. A target is what you were
 -- aiming at *then*, so storing one number and applying it to all of history
@@ -780,6 +790,7 @@ BEGIN
   FOREACH t IN ARRAY ARRAY['measurements', 'activities', 'weigh_ins', 'meals',
                            'meal_items', 'sync_state', 'garmin_credentials',
                            'bosch_credentials', 'fitprofile_credentials',
+                           'methreesixty_credentials',
                            'targets', 'ignored_days'] LOOP
     EXECUTE format('ALTER TABLE diet.%I ENABLE ROW LEVEL SECURITY', t);
     -- FORCE so the table owner is bound by the policy too.
@@ -807,7 +818,8 @@ GRANT SELECT ON diet.meals, diet.meal_items, diet.measurements, diet.activities,
                 diet.weigh_ins, diet.sync_state, diet.targets, diet.ignored_days
   TO diet_ro;
 REVOKE ALL ON diet.garmin_credentials, diet.bosch_credentials,
-              diet.fitprofile_credentials FROM diet_ro;
+              diet.fitprofile_credentials, diet.methreesixty_credentials
+  FROM diet_ro;
 
 -- The app role gets no table privileges in auth at all: identity is reachable
 -- only through the definer functions. The read-only role cannot even see the

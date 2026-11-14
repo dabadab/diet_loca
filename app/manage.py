@@ -596,6 +596,123 @@ def cmd_fitprofile_forget(args) -> None:
           "weigh-ins already stored are kept")
 
 
+def cmd_methreesixty_login(args) -> None:
+    """
+    Sign in to MeThreeSixty once, through Google, and store the tokens
+    encrypted.
+
+    Cognito accepts only the app's own `methreesixty://auth` redirect for this
+    client, a scheme no desktop browser follows, so the code comes back by hand
+    from devtools, as in bosch-login. After this the refresh token carries it.
+    """
+    from . import methreesixty, secretbox
+
+    try:
+        secretbox.check_usable()
+    except secretbox.KeyUnavailable as exc:
+        sys.exit(f"{exc}\n\nFix the key first: nothing has been sent anywhere.")
+
+    with _owner_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT user_id FROM auth.users WHERE email = lower(%s)",
+                    (args.email,))
+        row = cur.fetchone()
+    if row is None:
+        sys.exit(f"no such user: {args.email}")
+
+    url, verifier = methreesixty.start_login(args.provider)
+    print("\n1. Open devtools FIRST (F12), Network tab, tick 'Preserve log'.\n")
+    print(f"2. Open this and sign in with {args.provider}, as you do in the app:\n")
+    print(f"   {url}\n")
+    print("3. At the end the browser offers to open an app, or does nothing.")
+    print("   That is expected: the redirect is methreesixty://auth.\n")
+    print("4. In Network, find the LAST amazoncognito.com request with status 302")
+    print("   and copy its whole 'location:' response header (it holds ?code=).")
+    print("   Just the code on its own is fine too.\n")
+    redirect = input("5. Paste it here: ").strip()
+    try:
+        code = methreesixty.code_from_redirect(redirect)
+        session = methreesixty.Session(methreesixty.exchange_code(code, verifier))
+        # Prove the whole chain now, while the human is still here: ID token to
+        # AWS keys to a signed request that Size Stream accepts.
+        uid = methreesixty.user_id(session)
+    except methreesixty.MeThreeSixtyError as exc:
+        sys.exit(f"MeThreeSixty login failed: {exc}")
+
+    blob = methreesixty.session_blob(session)
+    try:
+        ciphertext, key_id = secretbox.encrypt(blob)
+    except secretbox.KeyUnavailable as exc:
+        sys.exit(f"{exc}\n\nNothing was stored; fix the key and sign in again.")
+
+    with _owner_conn() as conn, conn.cursor() as cur:
+        cur.execute("""INSERT INTO diet.methreesixty_credentials
+                         (user_id, secret_ciphertext, key_id)
+                       VALUES (%s, %s, %s)
+                       ON CONFLICT (user_id) DO UPDATE
+                         SET secret_ciphertext = EXCLUDED.secret_ciphertext,
+                             key_id = EXCLUDED.key_id, updated_at = now()""",
+                    (row["user_id"], ciphertext, key_id))
+        conn.commit()
+    print(f"\nstored encrypted MeThreeSixty tokens for {args.email} "
+          f"(Size Stream user {uid})")
+    print(f"next: `python -m app.manage methreesixty-probe {args.email}`")
+
+
+def cmd_methreesixty_probe(args) -> None:
+    """
+    Show what the live API returns: the scan list and the newest scan's
+    measures. This is what the parser gets written and corrected against.
+    """
+    from . import methreesixty, secretbox
+
+    with _owner_conn() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT c.user_id, c.secret_ciphertext, c.key_id
+                       FROM diet.methreesixty_credentials c
+                       JOIN auth.users u USING (user_id)
+                       WHERE u.email = lower(%s)""", (args.email,))
+        row = cur.fetchone()
+    if row is None:
+        sys.exit(f"no stored MeThreeSixty tokens for {args.email}; "
+                 "run methreesixty-login first")
+    session = methreesixty.resume(secretbox.decrypt(row["secret_ciphertext"],
+                                                    row["key_id"]))
+    try:
+        if args.raw:
+            import json as _json
+            out = {"profile": methreesixty.fetch_profile(session),
+                   "scans": methreesixty.fetch_scans(session)}
+            if out["scans"]:
+                sid = str(out["scans"][0].get("id"))
+                out["measures"] = methreesixty.fetch_measures(session, sid)
+            print(_json.dumps(out, indent=2, default=str))
+        else:
+            print("\n".join(methreesixty.probe(session, show_values=args.values)))
+    except methreesixty.MeThreeSixtyError as exc:
+        sys.exit(f"probe failed: {exc}")
+    finally:
+        # Refreshed tokens and new AWS keys are worth keeping either way.
+        if session.refreshed:
+            ciphertext, key_id = secretbox.encrypt(methreesixty.session_blob(session))
+            with _owner_conn() as conn, conn.cursor() as cur:
+                cur.execute("""UPDATE diet.methreesixty_credentials
+                               SET secret_ciphertext = %s, key_id = %s,
+                                   updated_at = now()
+                               WHERE user_id = %s""",
+                            (ciphertext, key_id, row["user_id"]))
+                conn.commit()
+
+
+def cmd_methreesixty_forget(args) -> None:
+    with _owner_conn() as conn, conn.cursor() as cur:
+        cur.execute("""DELETE FROM diet.methreesixty_credentials WHERE user_id =
+                       (SELECT user_id FROM auth.users WHERE email = lower(%s))""",
+                    (args.email,))
+        if cur.rowcount == 0:
+            sys.exit(f"no stored MeThreeSixty session for {args.email}")
+        conn.commit()
+    print(f"forgot the MeThreeSixty session for {args.email}")
+
+
 def cmd_garmin_forget(args) -> None:
     with _owner_conn() as conn, conn.cursor() as cur:
         cur.execute("""DELETE FROM diet.garmin_credentials WHERE user_id =
@@ -752,6 +869,28 @@ def main() -> None:
     ff = sub.add_parser("fitprofile-forget", help="delete the stored Fit Profile account")
     ff.add_argument("email")
     ff.set_defaults(fn=cmd_fitprofile_forget)
+
+    ml = sub.add_parser("methreesixty-login",
+                        help="store encrypted MeThreeSixty (Size Stream) tokens")
+    ml.add_argument("email", help="the diet-log account these scans belong to")
+    ml.add_argument("--provider", default="Google",
+                    help="how you sign in to the app: Google (default) or "
+                         "SignInWithApple")
+    ml.set_defaults(fn=cmd_methreesixty_login)
+
+    mp = sub.add_parser("methreesixty-probe",
+                        help="show the scan list and the newest scan's measures")
+    mp.add_argument("email")
+    mp.add_argument("--values", action="store_true",
+                    help="print the measure values, not just their names")
+    mp.add_argument("--raw", action="store_true",
+                    help="dump the raw JSON (profile, scans, newest measures)")
+    mp.set_defaults(fn=cmd_methreesixty_probe)
+
+    mf = sub.add_parser("methreesixty-forget",
+                        help="delete the stored MeThreeSixty session")
+    mf.add_argument("email")
+    mf.set_defaults(fn=cmd_methreesixty_forget)
 
     gf = sub.add_parser("garmin-forget", help="delete a stored Garmin session")
     gf.add_argument("email")

@@ -684,6 +684,39 @@ weight-only readings sends nothing. The user asked for exactly this rule
   body fat into `diet.measurements`. That is harmless: on a day with a weigh-in
   the scale's own figures win (`_scale_day_sql`).
 
+## MeThreeSixty body scans (in progress)
+
+`app/methreesixty.py`. MeThreeSixty is Size Stream's phone app: a 3D body scan
+from the phone camera, turned into girths (chest, stomach, waist, seat, left
+and right bicep, forearm, thigh and calf), body fat, lean body mass, surface
+area and weight. The measures are computed in Size Stream's cloud and the app
+reads them from there. **So far only sign-in and a probe exist**. Storage and
+the MCP surface wait for a live payload.
+
+**How it was found.** From the Android app (6.1.0) with jadx:
+`res/raw/amplifyconfiguration.json` for the Cognito pools and the API host, and
+`com.sizestream.data.scanning.datasource` for the endpoints.
+
+- **Sign-in** is a Cognito user pool's hosted login, with Google as the
+  identity provider (the user's choice in the app). The client accepts only the
+  app's `methreesixty://auth` redirect. `http://localhost` gets
+  `redirect_mismatch`, so `manage.py methreesixty-login` takes the code back from
+  devtools, as bosch-login does. Public client, PKCE. The refresh token is not
+  rotated.
+- **The API** (`https://three-d-id.sizestream.com`) is `AWS_IAM`. The pool's ID
+  token is exchanged at the identity pool (`GetId`,
+  `GetCredentialsForIdentity`) for hour-long AWS keys, and each request is
+  SigV4-signed for `execute-api`/us-east-1. The signer is hand-written (no
+  botocore) and is tested against AWS's published vectors.
+- **Endpoints:** `GET /users` returns the caller's profile, and its `userId`
+  keys the rest. `GET /users/{userId}/scans` takes `count`, `startAfter` and the
+  header `paginate: true`, and pages on `continueFrom`.
+  `GET /scans/{id}/data/moving-average/1?brand=methreesixty&function=methreesixty-custom-measures&version=1`
+  returns `{status, input, output: {measures, moving_average}}`.
+- The app hides some measures behind Premium through a remote-config list
+  (`measures_premium`). That is client-side, so the API may well return all of
+  them. To be confirmed by the probe.
+
 ## The weight chart
 
 On the Summary tab, over the same window as everything else there: since the

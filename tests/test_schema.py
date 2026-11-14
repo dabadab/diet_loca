@@ -14,7 +14,8 @@ import pytest
 # exactly the mistake this test exists to catch.
 USER_TABLES = ["measurements", "activities", "weigh_ins", "meals", "meal_items",
                "sync_state", "garmin_credentials", "bosch_credentials",
-               "fitprofile_credentials", "targets", "ignored_days"]
+               "fitprofile_credentials", "methreesixty_credentials", "targets",
+               "ignored_days"]
 
 
 def test_migration_is_idempotent(owner_dsn):
@@ -58,7 +59,8 @@ class TestReadOnlyRole:
                 c.execute("SELECT 1 FROM auth.users")
 
     @pytest.mark.parametrize("table", ["garmin_credentials", "bosch_credentials",
-                                       "fitprofile_credentials"])
+                                       "fitprofile_credentials",
+                                       "methreesixty_credentials"])
     def test_cannot_read_any_stored_credential(self, dsns, table):
         """A credential table is never readable through the model-facing tool,
         whichever connector it belongs to."""
