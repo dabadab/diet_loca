@@ -684,14 +684,13 @@ weight-only readings sends nothing. The user asked for exactly this rule
   body fat into `diet.measurements`. That is harmless: on a day with a weigh-in
   the scale's own figures win (`_scale_day_sql`).
 
-## MeThreeSixty body scans (in progress)
+## MeThreeSixty body scans
 
-`app/methreesixty.py`. MeThreeSixty is Size Stream's phone app: a 3D body scan
-from the phone camera, turned into girths (chest, stomach, waist, seat, left
-and right bicep, forearm, thigh and calf), body fat, lean body mass, surface
-area and weight. The measures are computed in Size Stream's cloud and the app
-reads them from there. **So far only sign-in and a probe exist**. Storage and
-the MCP surface wait for a live payload.
+`app/methreesixty.py`, `diet.body_scans`. MeThreeSixty is Size Stream's phone
+app: a 3D body scan from the phone camera, turned into girths (chest, stomach,
+waist, seat, and left and right bicep, forearm, thigh and calf), body fat, lean
+body mass, surface area and weight. The measures are computed in Size Stream's
+cloud and the app reads them from there, so this reads the same place.
 
 **How it was found.** From the Android app (6.1.0) with jadx:
 `res/raw/amplifyconfiguration.json` for the Cognito pools and the API host, and
@@ -713,9 +712,39 @@ the MCP surface wait for a live payload.
   header `paginate: true`, and pages on `continueFrom`.
   `GET /scans/{id}/data/moving-average/1?brand=methreesixty&function=methreesixty-custom-measures&version=1`
   returns `{status, input, output: {measures, moving_average}}`.
-- The app hides some measures behind Premium through a remote-config list
-  (`measures_premium`). That is client-side, so the API may well return all of
-  them. To be confirmed by the probe.
+- **Premium is client-side.** The app hides measures through a remote-config
+  list (`measures_premium`), but the API returns all of them on a free account
+  (the first probe, 15 Nov 2026).
+
+**What comes back, and what is stored.** The API answers in imperial whatever
+the app is set to: inches, pounds, square inches. Each scan carries two blocks:
+`measures` (this scan) and `moving_average` (over recent scans). **The app's
+screen shows the moving average**, which was checked against it: chest 43.034 in
+is the 109.3 cm it showed. `diet.body_scans` keeps one row per finished scan
+(`status = complete`; "waiting for data" is an abandoned one). The columns hold
+the scan's own reading in metric, `app_average` holds the moving average in
+metric, and `raw` keeps the original payload. Range CHECKs catch a unit slip:
+an unconverted 43 cm chest fails.
+
+Two of the figures are not measured. `Weight` is whatever was typed into the
+app's profile, and `LeanBodyMass` is that weight × (1 − body fat)
+(190.48 × 0.7624 = 145.22). They are stored as `entered_weight_kg` and
+`lean_body_mass_kg` and left out of `get_range`, since the scale measures both.
+BMI, FatMassIndex, Fitness, VisceralAdiposeTissue and WaistToHipRatio stay in
+`raw`. They are derived from the typed weight or their units are unknown.
+
+**Polling.** Only on the two-hourly full cycle, like Bosch: scans come every
+week or two. The scan list is one request and is read whole every time, so a
+scan deleted in the app is deleted here. An empty list deletes nothing, because
+that is more likely a glitch. Measures cost a request per scan, so they are
+fetched only for scans not yet stored and for those inside the window.
+`--only methreesixty --days N` refreshes older ones.
+
+**MCP.** `get_day` lists `body_scans`. `get_range` gains the twelve girths
+(`waist_cm`, ...) and `scan_body_fat_pct` from the day's last scan. That body fat
+is kept apart from the scale's `body_fat_pct`, because shape and impedance are
+different methods. `query_sql` can read `diet.body_scans`. The System tab gets
+a card and a Sync now button through `CONNECTORS`.
 
 ## The weight chart
 

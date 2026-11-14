@@ -73,3 +73,66 @@ class TestLogin:
     def test_wrong_paste_is_refused(self):
         with pytest.raises(methreesixty.MeThreeSixtyError, match="no code"):
             methreesixty.code_from_redirect("https://accounts.google.com/x?y=1")
+
+
+# The 6 Nov 2026 scan as the probe returned it; the average is trimmed.
+MEASURES = {"BMI": 27.89, "BicepLeft": 13.39, "BicepRight": 13.2, "BodyFat": 23.76,
+            "BodySurfaceArea": 3050.55, "CalfLeft": 15.32, "CalfRight": 15.46,
+            "Chest": 42.27, "FatMassIndex": 6.63, "Fitness": 16.82,
+            "ForearmLeft": 11.52, "ForearmRight": 11.45, "LeanBodyMass": 145.22,
+            "Seat": 40.54, "Stomach": 39.7, "ThighLeft": 22.74, "ThighRight": 22.98,
+            "VisceralAdiposeTissue": 2.22, "Waist": 37.83, "WaistToHipRatio": 96.88,
+            "Weight": 190.48}
+AVERAGE = {"BicepLeft": 13.628, "BodyFat": 25.7, "Chest": 43.034000000000006,
+           "LeanBodyMass": 143.574, "Stomach": 40.942, "Waist": 39.038,
+           "Weight": 190.48, "BodySurfaceArea": 3099.696}
+SCAN = {"id": "99525c3c-b381-4352-8ed7-250f6944ff8d", "date": "2026-11-06T06:14:37Z",
+        "status": "complete", "type": "2d3d-silhouette-2.1.0",
+        "links": {"upload": "https://signed.example/x"}, "data": {"mesh": "u"}}
+PAYLOAD = {"status": "complete", "version": 1, "input": {"scanId": SCAN["id"]},
+           "output": {"measures": MEASURES, "moving_average": AVERAGE}}
+
+
+class TestParsing:
+    def test_the_scan_is_converted_to_metric(self):
+        row = methreesixty.extract_scan(SCAN, PAYLOAD)
+        assert row["external_id"] == SCAN["id"]
+        assert row["measured_at"] == dt.datetime(2026, 11, 6, 6, 14, 37,
+                                                 tzinfo=dt.timezone.utc)
+        assert row["chest_cm"] == 107.4          # 42.27 in
+        assert row["stomach_cm"] == 100.8
+        assert row["calf_right_cm"] == 39.3
+        assert row["body_fat_pct"] == 23.8
+        assert row["body_surface_area_m2"] == 1.97
+        assert row["lean_body_mass_kg"] == 65.9
+        assert row["entered_weight_kg"] == 86.4
+
+    def test_the_moving_average_matches_the_apps_screen(self):
+        """What the Measurements screen showed on 14 Nov 2026."""
+        avg = methreesixty.extract_scan(SCAN, PAYLOAD)["app_average"]
+        assert avg["chest_cm"] == 109.3
+        assert avg["stomach_cm"] == 104.0
+        assert avg["waist_cm"] == 99.2
+        assert avg["bicep_left_cm"] == 34.6
+        assert avg["body_fat_pct"] == 25.7
+        assert avg["lean_body_mass_kg"] == 65.1
+        assert avg["body_surface_area_m2"] == 2.0
+
+    def test_figures_without_a_column_stay_in_raw_and_links_do_not(self):
+        row = methreesixty.extract_scan(SCAN, PAYLOAD)
+        assert "bmi" not in row and "fitness" not in row
+        assert row["raw"]["measures"]["output"]["measures"]["Fitness"] == 16.82
+        assert "links" not in row["raw"]["scan"] and "data" not in row["raw"]["scan"]
+
+    def test_an_unknown_or_non_numeric_value_is_left_out(self):
+        assert methreesixty.to_metric({"Chest": "n/a", "Neck": 15.0,
+                                       "BodyFat": True}) == {}
+
+    @pytest.mark.parametrize("payload", [{}, {"output": None},
+                                         {"output": {"measures": {}}}])
+    def test_a_scan_without_measures_is_not_stored(self, payload):
+        assert methreesixty.extract_scan(SCAN, payload) is None
+
+    def test_only_finished_scans_count(self):
+        assert methreesixty.is_complete({"status": "complete"})
+        assert not methreesixty.is_complete({"status": "waiting for data"})

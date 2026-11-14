@@ -216,7 +216,7 @@ def _garmin_verdict(d: dict, stale_after_h: int) -> dict:
             "action": None}
 
 
-# Bosch and Fit Profile, which share a shape. `every_h` is how often the poller
+# Bosch, Fit Profile and MeThreeSixty, which share a shape. `every_h` is how often the poller
 # should be trying: Bosch only runs on the two-hourly full cycle, Fit Profile on
 # the quarter-hourly one too. `thing` names what arrives, for the sentences.
 CONNECTORS = {
@@ -224,6 +224,8 @@ CONNECTORS = {
               "login": "docker compose exec app python -m app.manage bosch-login <email>"},
     "fitprofile": {"name": "Fit Profile", "thing": "weigh-in", "every_h": 3,
                    "login": "docker compose exec app python -m app.manage fitprofile-login <email>"},
+    "methreesixty": {"name": "MeThreeSixty", "thing": "scan", "every_h": 5,
+                     "login": "docker compose exec app python -m app.manage methreesixty-login <email>"},
 }
 
 
@@ -439,13 +441,13 @@ def garmin_sync(user: auth.User = Depends(current_user)):
 @app.post("/api/{connector}/sync")
 def connector_sync(connector: str, user: auth.User = Depends(current_user)):
     """
-    Pull from Bosch or Fit Profile now. The same shape as /api/garmin/sync --
+    Pull from Bosch, Fit Profile or MeThreeSixty now. The same shape as /api/garmin/sync --
     which, registered first, still answers for Garmin -- and the same claim, so
     the button and the poller cannot both be talking to the service at once.
     """
     if connector not in CONNECTORS:
         raise HTTPException(404, "unknown_connector")
-    from . import poller, bosch, fitprofile
+    from . import poller, bosch, fitprofile, methreesixty
     name = CONNECTORS[connector]["name"]
 
     cred = poller.credential_for(user.user_id, connector)
@@ -463,13 +465,15 @@ def connector_sync(connector: str, user: auth.User = Depends(current_user)):
         if connector == "bosch":
             stored, rejected = poller.poll_bosch(account, days, raw_root)
             deleted = 0
+        elif connector == "methreesixty":
+            stored, deleted, rejected = poller.poll_methreesixty(account, days, raw_root)
         else:
             stored, deleted, rejected = poller.poll_fitprofile(account, days, raw_root)
     except poller.RateLimited as exc:
         message = f"{name} rate-limited this client: {exc}"[:400]
         poller._try_record(user.user_id, message, connector)
         raise HTTPException(429, message) from None
-    except (bosch.NeedsLogin, fitprofile.NeedsLogin) as exc:
+    except (bosch.NeedsLogin, fitprofile.NeedsLogin, methreesixty.NeedsLogin) as exc:
         message = (f"{name} session expired; run "
                    f"`manage.py {connector}-login {user.email}`: {exc}")[:400]
         poller._try_record(user.user_id, message, connector)

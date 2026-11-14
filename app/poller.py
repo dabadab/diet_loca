@@ -29,6 +29,7 @@ security as anything else.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import random
@@ -46,7 +47,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
-from . import bosch, config, db, fitprofile, garmin, secretbox
+from . import bosch, config, db, fitprofile, garmin, methreesixty, secretbox
 
 log = logging.getLogger("diet.poller")
 
@@ -123,9 +124,24 @@ ON CONFLICT (user_id, source, external_id) DO UPDATE SET
 """
 
 
+BODY_SCAN_UPSERT = f"""
+INSERT INTO diet.body_scans
+  (user_id, source, external_id, measured_at, {", ".join(methreesixty.COLUMNS)},
+   app_average, raw)
+VALUES (diet.current_user_id(), 'methreesixty', %(external_id)s, %(measured_at)s,
+        {", ".join(f"%({c})s" for c in methreesixty.COLUMNS)},
+        %(app_average)s, %(raw)s)
+ON CONFLICT (user_id, source, external_id) DO UPDATE SET
+  measured_at = EXCLUDED.measured_at,
+  {", ".join(f"{c} = EXCLUDED.{c}" for c in methreesixty.COLUMNS)},
+  app_average = EXCLUDED.app_average, raw = EXCLUDED.raw, ingested_at = now()
+"""
+
+
 CREDENTIAL_TABLES = {"garmin": "diet.garmin_credentials",
                      "bosch": "diet.bosch_credentials",
-                     "fitprofile": "diet.fitprofile_credentials"}
+                     "fitprofile": "diet.fitprofile_credentials",
+                     "methreesixty": "diet.methreesixty_credentials"}
 
 
 def _accounts(settings, only_email: str | None,
@@ -174,6 +190,17 @@ def _store_fitprofile_blob(user_id, blob_json: str) -> None:
     ciphertext, key_id = secretbox.encrypt(blob_json)
     with db.user_tx(user_id) as cur:
         cur.execute("""UPDATE diet.fitprofile_credentials
+                       SET secret_ciphertext = %s, key_id = %s, updated_at = now()
+                       WHERE user_id = diet.current_user_id()""",
+                    (ciphertext, key_id))
+
+
+def _store_methreesixty_blob(user_id, blob_json: str) -> None:
+    """Refreshed tokens and AWS keys. Cognito does not rotate the refresh
+    token, so losing this costs only a refresh, but it saves one per cycle."""
+    ciphertext, key_id = secretbox.encrypt(blob_json)
+    with db.user_tx(user_id) as cur:
+        cur.execute("""UPDATE diet.methreesixty_credentials
                        SET secret_ciphertext = %s, key_id = %s, updated_at = now()
                        WHERE user_id = diet.current_user_id()""",
                     (ciphertext, key_id))
@@ -304,6 +331,37 @@ def _write_weigh_ins(user_id, rows: list[dict], deleted: list[str],
             cur.execute("""DELETE FROM diet.weigh_ins
                            WHERE source = %s AND external_id = ANY(%s)""",
                         (source, deleted))
+            removed = cur.rowcount
+    return stored, removed, rejected
+
+
+def _write_body_scans(user_id, rows: list[dict],
+                      keep: set[str] | None) -> tuple[int, int, list[str]]:
+    """
+    Upsert scans. When `keep` is given -- every scan id the account still has --
+    stored scans missing from it are deleted. Returns (stored, deleted, rejected).
+    """
+    stored, removed, rejected = 0, 0, []
+    with db.user_tx(user_id) as cur:
+        for row in rows:
+            params = {**row, "raw": Json(row["raw"]),
+                      "app_average": Json(row["app_average"])
+                      if row.get("app_average") else None}
+            cur.execute("SAVEPOINT scan")
+            try:
+                cur.execute(BODY_SCAN_UPSERT, params)
+                cur.execute("RELEASE SAVEPOINT scan")
+                stored += 1
+            except psycopg.Error as exc:
+                cur.execute("ROLLBACK TO SAVEPOINT scan")
+                rejected.append(f"methreesixty {row['external_id']} "
+                                f"({getattr(exc.diag, 'constraint_name', '?')})")
+        if keep is not None:
+            # Deleted in the app means deleted here, as for weigh-ins: a scan
+            # someone removed was usually a bad one (baggy clothes, wrong pose).
+            cur.execute("""DELETE FROM diet.body_scans
+                           WHERE source = 'methreesixty'
+                             AND NOT (external_id = ANY(%s))""", (sorted(keep),))
             removed = cur.rowcount
     return stored, removed, rejected
 
@@ -530,6 +588,69 @@ def poll_fitprofile(account: dict, days: int,
             log.info("fitprofile: signed in again for %s", account["email"])
 
 
+def poll_methreesixty(account: dict, days: int,
+                      raw_root: Path | None) -> tuple[int, int, list[str]]:
+    """
+    One account's body scans. Returns (stored, deleted, rejected).
+
+    The scan list is one cheap request and always fetched whole, so a scan
+    removed in the app goes here too. Measures cost a request per scan, so they
+    are fetched only for finished scans not stored yet, plus those inside the
+    window (a recent scan's moving average can still shift as the app settles).
+    """
+    user_id = account["user_id"]
+    tz = ZoneInfo(account["timezone"])
+    session = methreesixty.resume(
+        secretbox.decrypt(account["secret_ciphertext"], account["key_id"]))
+    since = datetime.combine(
+        datetime.now(tz).date() - timedelta(days=max(days - 1, 0)),
+        time_of_day(0, 0), tzinfo=tz)
+    raw_dir = (raw_root / account["email"] / "methreesixty") if raw_root else None
+    try:
+        try:
+            scans = methreesixty.fetch_scans(session)
+        except methreesixty.RateLimited as exc:
+            raise RateLimited(str(exc)) from exc
+        complete = [s for s in scans if methreesixty.is_complete(s) and s.get("id")]
+        with db.user_tx(user_id) as cur:
+            cur.execute("""SELECT external_id FROM diet.body_scans
+                           WHERE source = 'methreesixty'""")
+            have = {r["external_id"] for r in cur.fetchall()}
+
+        rows = []
+        for scan in complete:
+            sid = str(scan["id"])
+            when = datetime.fromisoformat(str(scan.get("date", "")).replace("Z", "+00:00")) \
+                if scan.get("date") else None
+            if sid in have and (when is None or when < since):
+                continue
+            try:
+                payload = methreesixty.fetch_measures(session, sid)
+            except methreesixty.RateLimited as exc:
+                raise RateLimited(str(exc)) from exc
+            if raw_dir is not None:
+                _archive(raw_dir, f"{sid}.json", {"scan": scan, "measures": payload})
+            row = methreesixty.extract_scan(scan, payload)
+            if row:
+                rows.append(row)
+        # An empty list is far more likely a glitch than every scan deleted at
+        # once, so it never deletes anything.
+        keep = {str(s["id"]) for s in complete} if complete else None
+        return _write_body_scans(user_id, rows, keep)
+    finally:
+        if session.refreshed:
+            _store_methreesixty_blob(user_id, methreesixty.session_blob(session))
+
+
+def _archive(directory: Path, name: str, payload) -> None:
+    """Best effort: an unwritable archive must not cost the sync."""
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / name).write_text(json.dumps(payload, default=str))
+    except OSError as exc:
+        log.warning("could not archive %s: %s", name, exc)
+
+
 def run_once(settings, args, raw_root: Path | None, days: int | None = None,
              include_bosch: bool = True) -> int:
     """
@@ -539,7 +660,8 @@ def run_once(settings, args, raw_root: Path | None, days: int | None = None,
     fifteen-minute latency, Bosch's rate limits are undocumented, and the short
     cycle's whole virtue is that it is cheap. It is an argument rather than
     something inferred from `days`, so that widening the short window cannot
-    quietly start calling a second API every quarter hour.
+    quietly start calling a second API every quarter hour. MeThreeSixty rides
+    on the same flag: scans come a few times a month and need no faster pass.
 
     Fit Profile, by contrast, runs on both cycles: a morning weigh-in is the
     one reading someone wants to see straight away, and asking for "what
@@ -560,7 +682,9 @@ def run_once(settings, args, raw_root: Path | None, days: int | None = None,
                       if include_bosch and wanted("bosch") else [])
     scale_accounts = (_accounts(settings, args.user, "fitprofile")
                       if wanted("fitprofile") else [])
-    if not accounts and not bosch_accounts and not scale_accounts:
+    scan_accounts = (_accounts(settings, args.user, "methreesixty")
+                     if include_bosch and wanted("methreesixty") else [])
+    if not (accounts or bosch_accounts or scale_accounts or scan_accounts):
         log.warning("no connector credentials stored%s; nothing to do",
                     f" for {args.user}" if args.user else "")
         _write_status(True, "no-accounts")
@@ -668,6 +792,39 @@ def run_once(settings, args, raw_root: Path | None, days: int | None = None,
                 log.error("bosch: %s failed: %s", email, message)
                 _try_record(account["user_id"], message, "bosch")
 
+        for account in scan_accounts:
+            email = account["email"]
+            try:
+                if not claim(account["user_id"], connector="methreesixty"):
+                    log.info("methreesixty: %s skipped, a sync is already in flight",
+                             email)
+                    continue
+                stored, removed, rejected = poll_methreesixty(account, window, raw_root)
+                _record(account["user_id"], ok=True, error=None,
+                        connector="methreesixty")
+                log.info("methreesixty: %s stored %d scan(s), deleted %d%s",
+                         email, stored, removed,
+                         f", {len(rejected)} rejected: {'; '.join(rejected[:4])}"
+                         if rejected else "")
+            except RateLimited as exc:
+                failures += 1
+                rate_limited = True
+                message = f"Size Stream rate-limited this client: {exc}"[:400]
+                log.error("methreesixty: %s %s", email, message)
+                _try_record(account["user_id"], message, "methreesixty")
+            except methreesixty.NeedsLogin as exc:
+                # The refresh token is spent; only a person at a browser fixes it.
+                failures += 1
+                message = (f"MeThreeSixty session expired; run "
+                           f"`manage.py methreesixty-login {email}`: {exc}")[:400]
+                log.error("methreesixty: %s", message)
+                _try_record(account["user_id"], message, "methreesixty")
+            except Exception as exc:
+                failures += 1
+                message = f"{type(exc).__name__}: {exc}"[:400]
+                log.error("methreesixty: %s failed: %s", email, message)
+                _try_record(account["user_id"], message, "methreesixty")
+
     finally:
         db.close_pool()
 
@@ -712,7 +869,8 @@ def main() -> int:
     ap.add_argument("--days", type=int, default=int(os.environ.get("GARMIN_POLL_DAYS", "3")),
                     help="trailing days to re-fetch (sleep lands late; upserts are idempotent)")
     ap.add_argument("--user", default=None, help="limit to one account by email")
-    ap.add_argument("--only", choices=("garmin", "bosch", "fitprofile"), default=None,
+    ap.add_argument("--only", choices=("garmin", "bosch", "fitprofile", "methreesixty"),
+                    default=None,
                     help="sync just one connector -- to backfill Bosch rides or "
                          "weigh-ins over a long --days window without re-fetching "
                          "a month of Garmin")

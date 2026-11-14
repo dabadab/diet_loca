@@ -12,7 +12,8 @@ import pytest
 
 # Every table holding user data. Adding one to diet without adding it here is
 # exactly the mistake this test exists to catch.
-USER_TABLES = ["measurements", "activities", "weigh_ins", "meals", "meal_items",
+USER_TABLES = ["measurements", "activities", "weigh_ins", "body_scans", "meals",
+               "meal_items",
                "sync_state", "garmin_credentials", "bosch_credentials",
                "fitprofile_credentials", "methreesixty_credentials", "targets",
                "ignored_days"]
@@ -187,7 +188,7 @@ class TestProvenance:
     list would never reach a database that already had it. The constraint is
     replaced outright every run instead -- idempotent *and* evolvable."""
 
-    @pytest.mark.parametrize("source", ["garmin", "bosch", "fitprofile",
+    @pytest.mark.parametrize("source", ["garmin", "bosch", "fitprofile", "methreesixty",
                                         "claude-estimate", "manual"])
     def test_every_writer_is_accepted(self, owner, user, source):
         owner.execute(

@@ -685,3 +685,139 @@ class TestPushWeighIns:
         fake_garmin(FakeApi())
         _, _, rejected = poller.poll_user(account, 1, None)
         assert rejected == []
+
+
+# ------------------------------------------------- MeThreeSixty body scans ---
+
+def body_scan(sid, when, chest_in=42.27, status="complete"):
+    return {"id": sid, "date": when.strftime("%Y-%m-%dT%H:%M:%SZ"), "status": status}
+
+
+def scan_measures(chest_in=42.27):
+    m = {"Chest": chest_in, "Stomach": 39.7, "Waist": 37.83, "Seat": 40.54,
+         "BodyFat": 23.76, "LeanBodyMass": 145.22, "Weight": 190.48}
+    return {"status": "complete", "output": {"measures": m, "moving_average": m}}
+
+
+class FakeScanner:
+    """Stands in for app.methreesixty's two fetches, which are the HTTP seam."""
+
+    def __init__(self, scans=(), measures=None, fail=None, refreshed=False):
+        self.scans = list(scans)
+        self.measures = measures or {}
+        self.fail, self.refreshed = fail, refreshed
+        self.blob = {"refresh_token": "r"}
+        self.fetched = []
+
+
+@pytest.fixture
+def scan_account(user, owner, pool):
+    owner.execute(
+        """INSERT INTO diet.methreesixty_credentials (user_id, secret_ciphertext, key_id)
+           VALUES (%s, %s, 'k')""", (user, b"ciphertext"))
+    return {"user_id": user, "email": "a@example.com",
+            "timezone": "Europe/Budapest", "secret_ciphertext": b"ciphertext",
+            "key_id": "k"}
+
+
+@pytest.fixture
+def fake_scanner(monkeypatch):
+    from app import methreesixty, secretbox
+    monkeypatch.setattr(secretbox, "decrypt", lambda ct, kid: "{}")
+
+    def fetch_scans(session):
+        if session.fail:
+            raise session.fail
+        return session.scans
+
+    def fetch_measures(session, sid):
+        session.fetched.append(sid)
+        return session.measures.get(sid, scan_measures())
+
+    monkeypatch.setattr(methreesixty, "fetch_scans", fetch_scans)
+    monkeypatch.setattr(methreesixty, "fetch_measures", fetch_measures)
+
+    def install(session):
+        monkeypatch.setattr(methreesixty, "resume", lambda blob: session)
+        return session
+    return install
+
+
+def stored_scans(pool, user):
+    with pool.user_tx(user) as cur:
+        return cur.execute("SELECT * FROM diet.body_scans ORDER BY measured_at").fetchall()
+
+
+_UTC_NOW = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+
+
+class TestBodyScans:
+    def test_finished_scans_are_stored_in_metric(self, scan_account, fake_scanner, pool):
+        fake_scanner(FakeScanner([body_scan("a", _UTC_NOW - dt.timedelta(hours=2)),
+                                  body_scan("b", _UTC_NOW, status="waiting for data")]))
+        stored, removed, rejected = poller.poll_methreesixty(scan_account, 3, None)
+        assert (stored, removed, rejected) == (1, 0, [])
+        [row] = stored_scans(pool, scan_account["user_id"])
+        assert row["source"] == "methreesixty" and row["external_id"] == "a"
+        assert float(row["chest_cm"]) == 107.4
+        assert row["app_average"]["chest_cm"] == 107.4
+        assert row["raw"]["measures"]["output"]["measures"]["Chest"] == 42.27
+
+    def test_an_old_scan_already_stored_is_not_fetched_again(
+            self, scan_account, fake_scanner):
+        old = body_scan("old", _UTC_NOW - dt.timedelta(days=30))
+        fake_scanner(FakeScanner([old]))
+        poller.poll_methreesixty(scan_account, 3, None)
+        scanner = fake_scanner(FakeScanner([old, body_scan("new", _UTC_NOW)]))
+        poller.poll_methreesixty(scan_account, 3, None)
+        assert scanner.fetched == ["new"]
+
+    def test_a_scan_deleted_in_the_app_is_deleted_here(
+            self, scan_account, fake_scanner, pool):
+        fake_scanner(FakeScanner([body_scan("a", _UTC_NOW - dt.timedelta(days=1)),
+                                  body_scan("b", _UTC_NOW)]))
+        poller.poll_methreesixty(scan_account, 3, None)
+        fake_scanner(FakeScanner([body_scan("a", _UTC_NOW - dt.timedelta(days=1))]))
+        _, removed, _ = poller.poll_methreesixty(scan_account, 3, None)
+        assert removed == 1
+        assert [r["external_id"] for r in stored_scans(pool, scan_account["user_id"])] == ["a"]
+
+    def test_an_empty_scan_list_deletes_nothing(self, scan_account, fake_scanner, pool):
+        """Far more likely a glitch than every scan deleted at once."""
+        fake_scanner(FakeScanner([body_scan("a", _UTC_NOW)]))
+        poller.poll_methreesixty(scan_account, 3, None)
+        fake_scanner(FakeScanner([]))
+        assert poller.poll_methreesixty(scan_account, 3, None) == (0, 0, [])
+        assert len(stored_scans(pool, scan_account["user_id"])) == 1
+
+    def test_a_value_left_in_inches_is_rejected(self, scan_account, fake_scanner):
+        """The schema's ranges catch a unit slip: 42 'cm' of chest is no adult."""
+        fake_scanner(FakeScanner([body_scan("a", _UTC_NOW)],
+                                 measures={"a": scan_measures(chest_in=42.27 / 2.54)}))
+        stored, _, rejected = poller.poll_methreesixty(scan_account, 3, None)
+        assert stored == 0 and "body_scans_trunk_sane" in rejected[0]
+
+    def test_refreshed_tokens_are_persisted_even_when_the_fetch_fails(
+            self, scan_account, fake_scanner, pool, monkeypatch):
+        from app import methreesixty, secretbox
+        monkeypatch.setattr(secretbox, "encrypt", lambda s: (b"new-ct", "k2"))
+        fake_scanner(FakeScanner(refreshed=True,
+                                 fail=methreesixty.MeThreeSixtyError("502")))
+        with pytest.raises(methreesixty.MeThreeSixtyError):
+            poller.poll_methreesixty(scan_account, 3, None)
+        with pool.user_tx(scan_account["user_id"]) as cur:
+            row = cur.execute("SELECT key_id FROM diet.methreesixty_credentials"
+                              ).fetchone()
+        assert row["key_id"] == "k2"
+
+    def test_a_rate_limit_is_raised_as_such(self, scan_account, fake_scanner):
+        from app import methreesixty
+        fake_scanner(FakeScanner(fail=methreesixty.RateLimited("429")))
+        with pytest.raises(poller.RateLimited):
+            poller.poll_methreesixty(scan_account, 3, None)
+
+    def test_scans_are_invisible_to_another_user(
+            self, scan_account, fake_scanner, pool, other_user):
+        fake_scanner(FakeScanner([body_scan("a", _UTC_NOW)]))
+        poller.poll_methreesixty(scan_account, 3, None)
+        assert stored_scans(pool, other_user) == []

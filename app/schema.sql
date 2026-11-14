@@ -84,7 +84,8 @@ END $dom$;
 -- and evolvable: adding a writer means editing one line here and nothing else.
 ALTER DOMAIN diet.provenance DROP CONSTRAINT IF EXISTS provenance_check;
 ALTER DOMAIN diet.provenance ADD CONSTRAINT provenance_check
-  CHECK (VALUE IN ('garmin', 'bosch', 'fitprofile', 'claude-estimate', 'manual'));
+  CHECK (VALUE IN ('garmin', 'bosch', 'fitprofile', 'methreesixty',
+                   'claude-estimate', 'manual'));
 
 -- ----------------------------------------------------------- auth.users ---
 
@@ -613,6 +614,83 @@ DROP TRIGGER IF EXISTS weigh_ins_local_date ON diet.weigh_ins;
 CREATE TRIGGER weigh_ins_local_date BEFORE INSERT OR UPDATE ON diet.weigh_ins
   FOR EACH ROW EXECUTE FUNCTION diet.set_local_date('measured_at');
 
+-- ----------------------------------------------------------- body_scans ---
+-- One row per finished MeThreeSixty scan: a 3D body scan from the phone camera,
+-- measured by Size Stream. Its own table rather than more weigh_ins columns:
+-- a scan measures shape (girths), the scale measures impedance, and the two
+-- body-fat figures come from different methods and should not be blended.
+--
+-- Metric throughout; app/methreesixty.py converts from the API's imperial.
+-- entered_weight_kg and lean_body_mass_kg are not measured by the scan: the
+-- weight is what was typed into the app, and lean mass is that weight times
+-- (1 - body fat). app_average is the app's moving average over recent scans,
+-- which is what its screen shows; the columns are this scan's own reading.
+
+CREATE TABLE IF NOT EXISTS diet.body_scans (
+  body_scan_id  bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  user_id       uuid NOT NULL REFERENCES auth.users(user_id) ON DELETE CASCADE,
+  source        diet.provenance NOT NULL,
+  external_id   text NOT NULL,          -- Size Stream scan id
+  measured_at   timestamptz NOT NULL,
+  local_date    date NOT NULL,
+  chest_cm          numeric(4,1),
+  stomach_cm        numeric(4,1),
+  waist_cm          numeric(4,1),
+  seat_cm           numeric(4,1),
+  bicep_left_cm     numeric(4,1),
+  bicep_right_cm    numeric(4,1),
+  forearm_left_cm   numeric(4,1),
+  forearm_right_cm  numeric(4,1),
+  thigh_left_cm     numeric(4,1),
+  thigh_right_cm    numeric(4,1),
+  calf_left_cm      numeric(4,1),
+  calf_right_cm     numeric(4,1),
+  body_fat_pct          numeric(4,1),
+  body_surface_area_m2  numeric(3,2),
+  lean_body_mass_kg     numeric(5,1),
+  entered_weight_kg     numeric(5,1),
+  app_average   jsonb,
+  raw           jsonb,
+  ingested_at   timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (user_id, source, external_id)
+);
+
+CREATE INDEX IF NOT EXISTS body_scans_lookup_idx
+  ON diet.body_scans (user_id, local_date DESC, measured_at);
+
+-- Wide enough for any adult, narrow enough to catch a value left in inches
+-- or pounds (a 109 cm chest is 43 in; unconverted, it would fail here).
+DO $bs$
+DECLARE c record;
+BEGIN
+  FOR c IN SELECT * FROM (VALUES
+      ('body_scans_trunk_sane',   'coalesce(chest_cm, 100) BETWEEN 50 AND 250 AND '
+                                  'coalesce(stomach_cm, 100) BETWEEN 40 AND 250 AND '
+                                  'coalesce(waist_cm, 100) BETWEEN 40 AND 250 AND '
+                                  'coalesce(seat_cm, 100) BETWEEN 50 AND 250'),
+      ('body_scans_limbs_sane',   'coalesce(bicep_left_cm, 30) BETWEEN 10 AND 80 AND '
+                                  'coalesce(bicep_right_cm, 30) BETWEEN 10 AND 80 AND '
+                                  'coalesce(forearm_left_cm, 30) BETWEEN 10 AND 70 AND '
+                                  'coalesce(forearm_right_cm, 30) BETWEEN 10 AND 70 AND '
+                                  'coalesce(thigh_left_cm, 50) BETWEEN 20 AND 120 AND '
+                                  'coalesce(thigh_right_cm, 50) BETWEEN 20 AND 120 AND '
+                                  'coalesce(calf_left_cm, 35) BETWEEN 15 AND 80 AND '
+                                  'coalesce(calf_right_cm, 35) BETWEEN 15 AND 80'),
+      ('body_scans_body_fat_sane', 'body_fat_pct IS NULL OR body_fat_pct BETWEEN 1 AND 75'),
+      ('body_scans_bsa_sane',      'body_surface_area_m2 IS NULL OR body_surface_area_m2 BETWEEN 0.5 AND 4'),
+      ('body_scans_lean_sane',     'lean_body_mass_kg IS NULL OR lean_body_mass_kg BETWEEN 10 AND 250'),
+      ('body_scans_weight_sane',   'entered_weight_kg IS NULL OR entered_weight_kg BETWEEN 20 AND 400')
+    ) AS t(name, expr) LOOP
+    EXECUTE format('ALTER TABLE diet.body_scans DROP CONSTRAINT IF EXISTS %I', c.name);
+    EXECUTE format('ALTER TABLE diet.body_scans ADD CONSTRAINT %I CHECK (%s)',
+                   c.name, c.expr);
+  END LOOP;
+END $bs$;
+
+DROP TRIGGER IF EXISTS body_scans_local_date ON diet.body_scans;
+CREATE TRIGGER body_scans_local_date BEFORE INSERT OR UPDATE ON diet.body_scans
+  FOR EACH ROW EXECUTE FUNCTION diet.set_local_date('measured_at');
+
 -- --------------------------------------------------------------- meals ----
 -- Estimated data, deliberately not sharing columns with measurements.
 -- Corrections are append-only: a correction inserts a new meal and points the
@@ -690,7 +768,8 @@ CREATE TABLE IF NOT EXISTS diet.sync_state (
 
 ALTER TABLE diet.sync_state DROP CONSTRAINT IF EXISTS sync_state_connector_check;
 ALTER TABLE diet.sync_state ADD CONSTRAINT sync_state_connector_check
-  CHECK (connector IN ('garmin', 'bosch', 'fitprofile', 'claude-mcp'));
+  CHECK (connector IN ('garmin', 'bosch', 'fitprofile', 'methreesixty',
+                       'claude-mcp'));
 
 -- Ciphertext only. The key lives outside the database, so a dump of this
 -- table is not a set of Garmin logins.
@@ -787,7 +866,8 @@ CREATE TABLE IF NOT EXISTS diet.ignored_days (
 DO $rls$
 DECLARE t text;
 BEGIN
-  FOREACH t IN ARRAY ARRAY['measurements', 'activities', 'weigh_ins', 'meals',
+  FOREACH t IN ARRAY ARRAY['measurements', 'activities', 'weigh_ins', 'body_scans',
+                           'meals',
                            'meal_items', 'sync_state', 'garmin_credentials',
                            'bosch_credentials', 'fitprofile_credentials',
                            'methreesixty_credentials',
@@ -815,7 +895,8 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA diet TO diet_app;
 -- schema also handed it diet.garmin_credentials, which the tool's own docstring
 -- never claimed and no query through it should reach.
 GRANT SELECT ON diet.meals, diet.meal_items, diet.measurements, diet.activities,
-                diet.weigh_ins, diet.sync_state, diet.targets, diet.ignored_days
+                diet.weigh_ins, diet.body_scans, diet.sync_state, diet.targets,
+                diet.ignored_days
   TO diet_ro;
 REVOKE ALL ON diet.garmin_credentials, diet.bosch_credentials,
               diet.fitprofile_credentials, diet.methreesixty_credentials

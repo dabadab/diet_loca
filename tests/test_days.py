@@ -11,6 +11,7 @@ import datetime as dt
 from zoneinfo import ZoneInfo
 
 import pytest
+from psycopg.types.json import Jsonb
 
 from app import queries, writes
 
@@ -350,3 +351,61 @@ class TestTheDaysWeight:
     def test_an_unknown_metric_is_named_with_the_known_ones(self, pool, user, today):
         with pool.user_tx(user) as cur, pytest.raises(ValueError, match="visceral_fat"):
             queries.range_metrics(cur, today, today, ["belly"])
+
+
+@pytest.fixture
+def scan(pool, user):
+    """A MeThreeSixty body scan at local `hh:mm` on `day`, already metric."""
+    n = iter(range(10_000))
+
+    def _scan(day, hh_mm, waist, body_fat=24.0, average=None):
+        hh, mm = map(int, hh_mm.split(":"))
+        at = dt.datetime.combine(day, dt.time(hh, mm), tzinfo=ZoneInfo(TZ))
+        with pool.user_tx(user) as cur:
+            cur.execute(
+                """INSERT INTO diet.body_scans
+                   (user_id, source, external_id, measured_at, waist_cm,
+                    body_fat_pct, entered_weight_kg, app_average)
+                   VALUES (diet.current_user_id(), 'methreesixty', %s, %s, %s, %s,
+                           86.4, %s)""",
+                (f"s{next(n)}", at, waist, body_fat,
+                 Jsonb(average) if average else None))
+    return _scan
+
+
+class TestBodyScans:
+    """Scans sit beside weigh-ins, never inside them: the scan's body fat is
+    from shape, the scale's from impedance, and one must not overwrite the
+    other."""
+
+    def test_day_detail_lists_the_days_scans(self, pool, user, scan, today):
+        day = today - dt.timedelta(days=1)
+        scan(day, "07:34", 96.1, average={"waist_cm": 99.2})
+        with pool.user_tx(user) as cur:
+            detail = queries.day_detail(cur, day)
+        [s] = detail["body_scans"]
+        assert s["waist_cm"] == 96.1 and s["entered_weight_kg"] == 86.4
+        assert s["source"] == "methreesixty"
+        assert s["app_average"] == {"waist_cm": 99.2}
+        assert s["chest_cm"] is None
+
+    def test_the_range_takes_the_days_last_scan(self, pool, user, scan, today):
+        day = today - dt.timedelta(days=1)
+        scan(day, "19:37", 99.0)
+        scan(day, "19:39", 98.0)      # the retake
+        with pool.user_tx(user) as cur:
+            rows = queries.range_metrics(cur, day, day, ["waist_cm"])
+        assert [(r["metric"], r["value"], r["unit"]) for r in rows] == \
+            [("waist_cm", 98.0, "cm")]
+
+    def test_scan_body_fat_does_not_replace_the_scales(
+            self, pool, user, scan, weigh, today):
+        day = today - dt.timedelta(days=1)
+        weigh(day, "07:00", 86.4, body_fat=22.4)
+        scan(day, "07:30", 96.0, body_fat=25.7)
+        with pool.user_tx(user) as cur:
+            rows = queries.range_metrics(cur, day, day,
+                                         ["body_fat_pct", "scan_body_fat_pct"])
+        got = {r["metric"]: (r["value"], r["source"]) for r in rows}
+        assert got == {"body_fat_pct": (22.4, "fitprofile"),
+                       "scan_body_fat_pct": (25.7, "methreesixty")}

@@ -223,6 +223,18 @@ def get_day(date: str | None = None) -> dict:
     in socks) are kept but are not the day's figure. A NULL body figure means
     that weigh-in did not measure it, not zero. On a day with a weigh-in, any
     Garmin `weight_kg` in `measurements` was typed in by hand and is superseded.
+
+    `body_scans` lists that day's MeThreeSixty 3D body scans (phone camera,
+    measured by Size Stream), metric: girths in cm (chest, stomach, waist,
+    seat, and left/right bicep, forearm, thigh, calf), body_fat_pct and
+    body_surface_area_m2. Stomach and waist are two separate girths, so
+    compare each only with itself. The scan's body fat comes from body shape, a
+    different method from the scale's impedance, so the two will differ. Do not
+    average them together. `entered_weight_kg` is the weight typed into the
+    app, not measured, and `lean_body_mass_kg` is just that weight times
+    (1 - body fat). `app_average` holds the app's moving average over recent
+    scans, which is what the app's screen shows. The other fields are this
+    scan's own reading.
     """
     user_id, tz = _identity()
     with db.user_tx(user_id) as cur:
@@ -244,6 +256,13 @@ def get_range(from_date: str | None = None, to_date: str | None = None,
     weight_kg replaces Garmin's; `source` says which one a row came from. The
     scale's bmr_kcal is a formula from weight and impedance, not a measurement,
     and is not part of energy expenditure.
+
+    Body scans (MeThreeSixty) give one value a day from the day's last scan,
+    in cm: chest_cm, stomach_cm, waist_cm, seat_cm, bicep_left_cm,
+    bicep_right_cm, forearm_left_cm, forearm_right_cm, thigh_left_cm,
+    thigh_right_cm, calf_left_cm, calf_right_cm. scan_body_fat_pct is the
+    scan's body-fat estimate from shape, kept apart from the scale's
+    body_fat_pct. Scans are taken every week or two, so most days have none.
 
     Dates are YYYY-MM-DD in the user's timezone; the default range is the last
     14 days. `metrics` defaults to all of them.
@@ -459,12 +478,16 @@ def query_sql(sql: str) -> dict:
     the identity tables at all. Row-level security still applies, so you can
     only ever read this user's rows — write the query as if the tables held
     their data alone. Tables: diet.meals, diet.meal_items, diet.measurements,
-    diet.activities, diet.weigh_ins, diet.sync_state, diet.targets,
-    diet.ignored_days. Single SELECT (or WITH) statement, at most 500 rows
+    diet.activities, diet.weigh_ins, diet.body_scans, diet.sync_state,
+    diet.targets, diet.ignored_days. Single SELECT (or WITH) statement, at most 500 rows
     returned. Note that diet.activities holds one row per instrument, so a ride
     recorded by both a watch and an ebike is two rows — count outings with
     care. diet.weigh_ins holds every weigh-in, often several a day; its `raw`
     column has the scale's full payload, including segmental (per-limb) figures.
+    diet.body_scans holds one row per MeThreeSixty scan. Its `raw` has the
+    API's original imperial payload, including figures that have no column
+    (BMI, FatMassIndex, Fitness, VisceralAdiposeTissue, WaistToHipRatio, all
+    based on the weight typed into the app).
     """
     if not db.ro_pool_ready():
         raise ToolError("ad-hoc SQL is not available on this server "

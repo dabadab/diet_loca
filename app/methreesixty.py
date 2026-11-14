@@ -375,6 +375,98 @@ def fetch_measures(session: Session, scan_id: str) -> dict:
                        headers={"timeout": "10"}) or {}
 
 
+# --- parsing ---------------------------------------------------------------
+#
+# Size Stream answers in imperial whatever the app is set to (the app converts
+# for display): girths in inches, masses in pounds, surface area in square
+# inches. Checked against the app's own screen on 15 Nov 2026: chest 43.034 in
+# is the 109.3 cm it shows, lean mass 143.574 lb its 65.1 kg.
+#
+# Each scan carries two sets. `measures` is this scan's own reading.
+# `moving_average` is what the app actually displays: a mean over the latest
+# few scans, so it moves less. Both are kept; the columns hold the scan's own.
+#
+# Promoted to columns: the girths and body fat, which come from the scan, and
+# lean body mass and the weight they rest on. Those last two are not measured:
+# Weight is whatever was typed into the app's profile, and lean body mass is
+# that weight times (1 - body fat). The rest -- BMI, FatMassIndex, Fitness,
+# VisceralAdiposeTissue, WaistToHipRatio -- stays in `raw`, unit unknown or
+# derived from the typed weight.
+INCH_CM = 2.54
+LB_KG = 0.45359237
+SQIN_M2 = 0.00064516
+
+MEASURE_COLUMNS: dict[str, tuple[str, float, int]] = {
+    # API key: (column, factor to metric, decimals)
+    "Chest":           ("chest_cm", INCH_CM, 1),
+    "Stomach":         ("stomach_cm", INCH_CM, 1),
+    "Waist":           ("waist_cm", INCH_CM, 1),
+    "Seat":            ("seat_cm", INCH_CM, 1),
+    "BicepLeft":       ("bicep_left_cm", INCH_CM, 1),
+    "BicepRight":      ("bicep_right_cm", INCH_CM, 1),
+    "ForearmLeft":     ("forearm_left_cm", INCH_CM, 1),
+    "ForearmRight":    ("forearm_right_cm", INCH_CM, 1),
+    "ThighLeft":       ("thigh_left_cm", INCH_CM, 1),
+    "ThighRight":      ("thigh_right_cm", INCH_CM, 1),
+    "CalfLeft":        ("calf_left_cm", INCH_CM, 1),
+    "CalfRight":       ("calf_right_cm", INCH_CM, 1),
+    "BodyFat":         ("body_fat_pct", 1.0, 1),
+    "BodySurfaceArea": ("body_surface_area_m2", SQIN_M2, 2),
+    "LeanBodyMass":    ("lean_body_mass_kg", LB_KG, 1),
+    "Weight":          ("entered_weight_kg", LB_KG, 1),
+}
+COLUMNS = tuple(c for c, _, _ in MEASURE_COLUMNS.values())
+
+
+def to_metric(block: Any) -> dict[str, float]:
+    """One `measures` or `moving_average` block, as {column: metric value}.
+    Keys it does not know, and values that are not numbers, are left out."""
+    out: dict[str, float] = {}
+    if not isinstance(block, dict):
+        return out
+    for key, (column, factor, places) in MEASURE_COLUMNS.items():
+        value = block.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            out[column] = round(float(value) * factor, places)
+    return out
+
+
+def is_complete(scan: dict) -> bool:
+    """Only finished scans have measures; 'waiting for data' is an abandoned
+    or still-processing one."""
+    return str(scan.get("status", "")).lower() == "complete"
+
+
+def extract_scan(scan: dict, payload: dict) -> dict | None:
+    """
+    One row for diet.body_scans, or None when there is nothing to store.
+
+    `scan` is the scan-list entry (id and time), `payload` the measures reply.
+    """
+    if not isinstance(scan, dict) or not scan.get("id") or not scan.get("date"):
+        return None
+    output = (payload or {}).get("output")
+    if not isinstance(output, dict):
+        return None
+    values = to_metric(output.get("measures"))
+    if not values:
+        return None
+    measured_at = dt.datetime.fromisoformat(str(scan["date"]).replace("Z", "+00:00"))
+    if measured_at.tzinfo is None:
+        measured_at = measured_at.replace(tzinfo=dt.timezone.utc)
+    return {
+        "external_id": str(scan["id"]),
+        "measured_at": measured_at,
+        **{c: values.get(c) for c in COLUMNS},
+        "app_average": to_metric(output.get("moving_average")) or None,
+        # Everything, so nothing needs re-fetching to recover a figure: the
+        # scan entry minus its upload links (signed URLs, useless once stale),
+        # and the measures reply whole.
+        "raw": {"scan": {k: v for k, v in scan.items() if k not in ("links", "data")},
+                "measures": payload},
+    }
+
+
 def probe(session: Session, show_values: bool = False) -> list[str]:
     """
     What the live API returns, for writing the parser against: the profile's

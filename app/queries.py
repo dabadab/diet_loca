@@ -169,8 +169,24 @@ SCALE_METRICS = {
     "protein_pct": "%", "bone_mass_kg": "kg", "bmr_kcal": "kcal",
     "metabolic_age": "years",
 }
-RANGE_METRICS = KNOWN_METRICS + tuple(m for m in SCALE_METRICS
-                                      if m not in KNOWN_METRICS)
+# What a day's body scan (MeThreeSixty) contributes: range name -> (column in
+# diet.body_scans, unit). The scan's body fat gets its own name because it is a
+# different method from the scale's and must not merge into body_fat_pct.
+# Lean mass and weight are left out: both rest on the weight typed into the
+# app, and the scale measures those properly.
+SCAN_GIRTHS = ("chest_cm", "stomach_cm", "waist_cm", "seat_cm",
+               "bicep_left_cm", "bicep_right_cm", "forearm_left_cm",
+               "forearm_right_cm", "thigh_left_cm", "thigh_right_cm",
+               "calf_left_cm", "calf_right_cm")
+SCAN_METRICS = {**{g: (g, "cm") for g in SCAN_GIRTHS},
+                "scan_body_fat_pct": ("body_fat_pct", "%")}
+# Everything get_day reports per scan.
+SCAN_COLUMNS = SCAN_GIRTHS + ("body_fat_pct", "body_surface_area_m2",
+                              "lean_body_mass_kg", "entered_weight_kg")
+
+RANGE_METRICS = (KNOWN_METRICS
+                 + tuple(m for m in SCALE_METRICS if m not in KNOWN_METRICS)
+                 + tuple(SCAN_METRICS))
 
 
 def day_detail(cur, local_date) -> dict:
@@ -217,6 +233,14 @@ def day_detail(cur, local_date) -> dict:
     """, {"d": local_date})
     weigh_ins = [_weigh_in_row(r) for r in cur.fetchall()]
 
+    cur.execute(f"""
+        SELECT measured_at, source, {", ".join(SCAN_COLUMNS)}, app_average
+        FROM diet.body_scans
+        WHERE local_date = %(d)s
+        ORDER BY measured_at
+    """, {"d": local_date})
+    body_scans = [_body_scan_row(r) for r in cur.fetchall()]
+
     cur.execute(_TARGET_ON_SQL, {"d": local_date})
     tgt = cur.fetchone()
 
@@ -231,6 +255,10 @@ def day_detail(cur, local_date) -> dict:
         # Every weigh-in of the day, in order. The one the day's weight comes
         # from is flagged, so a reader can see why it was that one.
         "weigh_ins": _flag_pick(weigh_ins),
+        # MeThreeSixty 3D body scans that day, metric. The columns are the
+        # scan's own reading; app_average is the app's moving average over
+        # recent scans, which is the figure its screen shows.
+        "body_scans": body_scans,
         # Context only. Their calories are already counted inside the day's
         # active_kcal measurement, so energy_in_kcal below does not touch them
         # and nothing downstream may add them to expenditure.
@@ -252,6 +280,15 @@ def _weigh_in_row(r) -> dict:
     row = dict(r)
     row["measured_at"] = row["measured_at"].isoformat()
     for k in ("weight_kg",) + _BODY_COLUMNS:
+        if row[k] is not None:
+            row[k] = float(row[k])
+    return row
+
+
+def _body_scan_row(r) -> dict:
+    row = dict(r)
+    row["measured_at"] = row["measured_at"].isoformat()
+    for k in SCAN_COLUMNS:
         if row[k] is not None:
             row[k] = float(row[k])
     return row
@@ -284,8 +321,16 @@ def range_metrics(cur, from_date, to_date, metrics: list[str] | None = None) -> 
     # is doubled because psycopg would read it as a placeholder.
     scale_values = ", ".join(f"('{m}', s.{m}::float8, '{u.replace('%', '%%')}')"
                              for m, u in SCALE_METRICS.items())
+    scan_values = ", ".join(f"('{m}', b.{col}::float8, '{u.replace('%', '%%')}')"
+                            for m, (col, u) in SCAN_METRICS.items())
     cur.execute(f"""
-        WITH scale_day AS ({_scale_day_sql("local_date BETWEEN %(a)s AND %(b)s")})
+        WITH scale_day AS ({_scale_day_sql("local_date BETWEEN %(a)s AND %(b)s")}),
+        -- A day's last scan: a second scan the same day is a retake.
+        scan_day AS (
+            SELECT DISTINCT ON (local_date) *
+            FROM diet.body_scans
+            WHERE local_date BETWEEN %(a)s AND %(b)s
+            ORDER BY local_date, measured_at DESC)
         SELECT local_date, metric, value, unit, source
         FROM diet.measurements m
         WHERE local_date BETWEEN %(a)s AND %(b)s AND metric = ANY(%(m)s)
@@ -296,6 +341,11 @@ def range_metrics(cur, from_date, to_date, metrics: list[str] | None = None) -> 
         SELECT s.local_date, v.metric, v.value, v.unit, s.source
         FROM scale_day s
         CROSS JOIN LATERAL (VALUES {scale_values}) AS v(metric, value, unit)
+        WHERE v.value IS NOT NULL AND v.metric = ANY(%(m)s)
+        UNION ALL
+        SELECT b.local_date, v.metric, v.value, v.unit, b.source
+        FROM scan_day b
+        CROSS JOIN LATERAL (VALUES {scan_values}) AS v(metric, value, unit)
         WHERE v.value IS NOT NULL AND v.metric = ANY(%(m)s)
         ORDER BY local_date, metric
     """, {"a": from_date, "b": to_date, "m": wanted,
@@ -361,6 +411,7 @@ def garmin_diagnostics(cur, timezone: str) -> dict:
 _CONNECTOR_DATA = {
     "bosch":      ("diet.bosch_credentials", "diet.activities"),
     "fitprofile": ("diet.fitprofile_credentials", "diet.weigh_ins"),
+    "methreesixty": ("diet.methreesixty_credentials", "diet.body_scans"),
 }
 
 

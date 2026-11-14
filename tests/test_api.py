@@ -203,7 +203,7 @@ class TestOtherConnectors:
     def test_unconnected_connectors_are_off_not_down(self, client, signed_in):
         _, _, body = client("/api/status")
         conns = body["diagnostics"]["connectors"]
-        assert set(conns) == {"bosch", "fitprofile"}
+        assert set(conns) == {"bosch", "fitprofile", "methreesixty"}
         for c in conns.values():
             assert c["credential"] is None and c["verdict"]["state"] == "off"
         stages = {s["stage"]: s for s in body["stages"]}

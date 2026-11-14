@@ -208,6 +208,11 @@ class TestQuerySql:
         got = mcp("query_sql", sql="SELECT count(*) AS n FROM diet.meals")
         assert got["rows"] == [{"n": 1}]
 
+    def test_body_scans_are_readable(self, mcp):
+        """The docstring offers diet.body_scans; the role's grant must too."""
+        got = mcp("query_sql", sql="SELECT count(*) AS n FROM diet.body_scans")
+        assert got["rows"] == [{"n": 0}]
+
     @pytest.mark.parametrize("sql, because", [
         ("DELETE FROM diet.meals", "not a SELECT"),
         ("WITH x AS (UPDATE diet.meals SET description = 'o' RETURNING 1) "
