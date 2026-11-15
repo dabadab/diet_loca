@@ -211,3 +211,22 @@ def unignore_day(cur, *, local_date) -> bool:
     """Count a day again. Returns whether it had been ignored."""
     cur.execute("DELETE FROM diet.ignored_days WHERE local_date = %s", (local_date,))
     return cur.rowcount > 0
+
+
+def set_note(cur, *, topic: str, body: str) -> dict:
+    """Save a standing note. Saving an existing topic replaces its text."""
+    cur.execute("""
+        INSERT INTO diet.notes (user_id, topic, body)
+        VALUES (diet.current_user_id(), %s, %s)
+        ON CONFLICT (user_id, topic) DO UPDATE
+          SET body = EXCLUDED.body, updated_at = now()
+        RETURNING topic, body
+    """, (topic, body))
+    row = cur.fetchone()
+    return {"topic": row["topic"], "body": row["body"]}
+
+
+def delete_note(cur, *, topic: str) -> bool:
+    """Remove a note by its exact topic. Returns whether there was one."""
+    cur.execute("DELETE FROM diet.notes WHERE topic = %s", (topic,))
+    return cur.rowcount > 0

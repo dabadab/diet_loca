@@ -496,6 +496,13 @@ def targets_list(cur) -> list[dict]:
              "set_at": r["created_at"].isoformat()} for r in cur.fetchall()]
 
 
+def notes_list(cur) -> list[dict]:
+    """Every standing note, by topic."""
+    cur.execute("SELECT topic, body, updated_at FROM diet.notes ORDER BY topic")
+    return [{"topic": r["topic"], "body": r["body"],
+             "updated_at": r["updated_at"].isoformat()} for r in cur.fetchall()]
+
+
 # ---------------------------------------------------------- activities ----
 # Workouts, as context for a day's energy figures. Their calories are already
 # inside the day's active_kcal, so nothing here may be summed into expenditure.

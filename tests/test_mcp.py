@@ -65,9 +65,9 @@ def test_the_published_tool_surface(server, user, issue_token):
         async with Client(f"{server}/mcp", auth=token) as c:
             return sorted(t.name for t in await c.list_tools())
     assert run(go()) == [
-        "clear_target", "correct_meal", "get_activities", "get_day",
-        "get_ignored_days", "get_range", "get_targets", "ignore_day",
-        "log_meal", "query_sql", "set_target", "unignore_day",
+        "clear_target", "correct_meal", "delete_note", "get_activities", "get_day",
+        "get_ignored_days", "get_notes", "get_range", "get_targets", "ignore_day",
+        "log_meal", "query_sql", "set_note", "set_target", "unignore_day",
     ]
 
 
@@ -253,3 +253,23 @@ class TestIsolation:
         with pytest.raises(Exception, match="not being ignored"):
             mcp_other("unignore_day", date=day)
         assert mcp("get_day", date=day)["ignored"] is True
+
+
+class TestNotes:
+    def test_set_replace_list_delete(self, mcp):
+        assert mcp("get_notes")["notes"] == []
+        mcp("set_note", topic="cardio", body="Garmin cardio is circuit training")
+        mcp("set_note", topic="cardio", body="Full-body circuit training")
+        notes = mcp("get_notes")["notes"]
+        assert [(n["topic"], n["body"]) for n in notes] == \
+            [("cardio", "Full-body circuit training")]
+        mcp("delete_note", topic="cardio")
+        assert mcp("get_notes")["notes"] == []
+
+    def test_deleting_an_unknown_topic_is_refused(self, mcp):
+        with pytest.raises(Exception, match="no note"):
+            mcp("delete_note", topic="nope")
+
+    def test_an_empty_body_is_refused(self, mcp):
+        with pytest.raises(Exception, match="required"):
+            mcp("set_note", topic="x", body="  ")

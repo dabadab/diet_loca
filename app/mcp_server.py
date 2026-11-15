@@ -58,7 +58,11 @@ mcp = FastMCP(
         "stored as such; measurements come from a fitness tracker and are not "
         "writable here. Days are calendar days in the user's own timezone. "
         "When correcting a meal, use correct_meal rather than logging a second "
-        "one -- corrections keep the original for comparison."
+        "one -- corrections keep the original for comparison. "
+        "Call get_notes at the start of a session: it holds standing facts "
+        "about how to interpret this user's data (for instance what an "
+        "activity type really is). When the user explains such a fact, or "
+        "corrects a misreading, save it with set_note."
     ),
     auth=_auth,
 )
@@ -517,3 +521,55 @@ def query_sql(sql: str) -> dict:
         "row_count": len(rows),
         "truncated": truncated,
     }
+
+
+@mcp.tool
+def get_notes() -> dict:
+    """
+    The standing notes about how to interpret this user's data.
+
+    Read these before interpreting activities, measurements or meals: they are
+    facts the user would otherwise have to explain in every session, such as
+    what an activity type really is.
+    """
+    user_id, _ = _identity()
+    with db.user_tx(user_id) as cur:
+        return {"notes": queries.notes_list(cur)}
+
+
+@mcp.tool
+def set_note(topic: str, body: str) -> dict:
+    """
+    Save a standing note, replacing any existing note with the same topic.
+
+    Use it whenever the user explains or corrects something about their data
+    that a later session would get wrong without being told ("Garmin's cardio
+    is full-body circuit training"). `topic` is a short label (60 characters at
+    most) and `body` the fact itself (1000 at most). Keep one fact per topic so
+    it can be changed or removed on its own.
+    """
+    user_id, _ = _identity()
+    topic, body = (topic or "").strip(), (body or "").strip()
+    if not topic or not body:
+        raise ToolError("both a topic and a body are required")
+    try:
+        with db.user_tx(user_id) as cur:
+            saved = writes.set_note(cur, topic=topic, body=body)
+            saved["notes"] = queries.notes_list(cur)
+            return saved
+    except psycopg.Error as exc:
+        raise _explain(exc) from None
+
+
+@mcp.tool
+def delete_note(topic: str) -> dict:
+    """Remove the note with exactly this topic. Refuses an unknown topic and
+    lists the existing ones."""
+    user_id, _ = _identity()
+    with db.user_tx(user_id) as cur:
+        if not writes.delete_note(cur, topic=(topic or "").strip()):
+            existing = [n["topic"] for n in queries.notes_list(cur)]
+            raise ToolError(
+                f"no note with topic {topic!r}. "
+                + (f"Topics: {', '.join(existing)}" if existing else "There are no notes."))
+        return {"deleted": topic.strip(), "notes": queries.notes_list(cur)}

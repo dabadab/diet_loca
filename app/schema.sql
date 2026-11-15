@@ -859,6 +859,22 @@ CREATE TABLE IF NOT EXISTS diet.ignored_days (
   PRIMARY KEY (user_id, local_date)
 );
 
+-- ---------------------------------------------------------------- notes ----
+-- Standing facts about how to read this user's data ("Garmin's cardio is
+-- circuit training"), so that no session has to be told again. Per user, hence
+-- not in the server-wide MCP instructions: those point at get_notes instead.
+-- One note per topic; saving a topic again replaces it.
+
+CREATE TABLE IF NOT EXISTS diet.notes (
+  note_id    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  user_id    uuid NOT NULL REFERENCES auth.users(user_id) ON DELETE CASCADE,
+  topic      text NOT NULL CHECK (length(topic) BETWEEN 1 AND 60),
+  body       text NOT NULL CHECK (length(body) BETWEEN 1 AND 1000),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (user_id, topic)
+);
+
 -- ---------------------------------------------------------------- RLS -----
 -- Applied by loop rather than by hand: adding a table to the list is the only
 -- thing anyone has to remember, and no table can quietly end up unprotected.
@@ -871,7 +887,7 @@ BEGIN
                            'meal_items', 'sync_state', 'garmin_credentials',
                            'bosch_credentials', 'fitprofile_credentials',
                            'methreesixty_credentials',
-                           'targets', 'ignored_days'] LOOP
+                           'targets', 'ignored_days', 'notes'] LOOP
     EXECUTE format('ALTER TABLE diet.%I ENABLE ROW LEVEL SECURITY', t);
     -- FORCE so the table owner is bound by the policy too.
     EXECUTE format('ALTER TABLE diet.%I FORCE ROW LEVEL SECURITY', t);
@@ -896,7 +912,7 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA diet TO diet_app;
 -- never claimed and no query through it should reach.
 GRANT SELECT ON diet.meals, diet.meal_items, diet.measurements, diet.activities,
                 diet.weigh_ins, diet.body_scans, diet.sync_state, diet.targets,
-                diet.ignored_days
+                diet.ignored_days, diet.notes
   TO diet_ro;
 REVOKE ALL ON diet.garmin_credentials, diet.bosch_credentials,
               diet.fitprofile_credentials, diet.methreesixty_credentials

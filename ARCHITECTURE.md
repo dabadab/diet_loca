@@ -43,7 +43,7 @@ Claude Code, over this service's own OAuth — and both readable in the browser.
 - `web/index.html` — the frontend, now with a sign-in form. The `?as=` user
   switch is gone; the shape of every API response is unchanged from the stub
   except that `energy_out_kcal` may be null (see below).
-- `app/mcp_server.py` — the five MCP tools, mounted at `/mcp`. Identity comes
+- `app/mcp_server.py` — the MCP tools, mounted at `/mcp`. Identity comes
   from a bearer token verified against `auth.api_tokens`; no tool takes a user
   id, and every tool body runs inside one of the transaction wrappers.
 - `app/writes.py` — the first write paths in the project. Rows are stamped with
@@ -286,6 +286,11 @@ Built, on FastMCP 4, and verified against Postgres 13 and 17:
   inside `active_kcal` and must not be added to expenditure
 - `ignore_day(date, reason)` / `unignore_day(date)` / `get_ignored_days()` —
   leave a day out of the summaries, with the reason recorded
+- `get_notes()` / `set_note(topic, body)` / `delete_note(topic)` — standing,
+  per-user facts about how to read the data (e.g. Garmin's `cardio` is
+  full-body circuit training). The server instructions tell a session to call
+  `get_notes` first; they cannot hold the notes themselves, being server-wide
+  while the notes are per user
 - `query_sql(sql)` — separate **read-only** Postgres role, RLS still applies
 
 Two things the testing changed. The `SELECT`-prefix check on `query_sql` is not
