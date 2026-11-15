@@ -42,6 +42,25 @@ That is the whole deploy. The app applies its own schema at startup under an
 advisory lock, so there is no migration step to remember and no reliance on the
 Postgres image's first-boot hooks — redeploying onto an existing volume works.
 
+**Where the data lives:** everything is under this directory — `.env`,
+`secrets/` and `data/` (`data/pgdata` is Postgres, `data/garminraw` the Garmin
+payload archive). To move the installation, `docker compose down`, tar the
+whole directory, unpack it elsewhere and `docker compose up -d`. On a fresh
+install, `mkdir -p data/garminraw && sudo chown 10001:10001 data/garminraw`
+first (bind mounts do not inherit the image's ownership).
+
+*Migrating from the old named volumes* (`pgdata`, `garminraw`; the volume names
+are prefixed with the project name, see `docker volume ls`):
+
+```bash
+docker compose down
+mkdir -p data/pgdata data/garminraw
+for v in pgdata garminraw; do
+  docker run --rm -v "$(basename "$PWD")_$v":/from -v "$PWD/data/$v":/to alpine cp -a /from/. /to/
+done
+docker compose up -d --build
+```
+
 **Before exposing it:** set `COOKIE_SECURE=1` in `.env` (the generated file ships
 with `0` so login works over plain http on localhost) and put TLS in front.
 

@@ -7,3 +7,4 @@ __pycache__/
 *.md
 stub_api.py
 index.html
+data/

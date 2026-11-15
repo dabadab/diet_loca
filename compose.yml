@@ -15,7 +15,10 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-diet}
       POSTGRES_INITDB_ARGS: "--data-checksums"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # Bind mounts under ./data, next to this file, so the whole installation
+      # (compose.yml, .env, secrets/, data/) moves as one tarball. Stop the
+      # stack before tarring so Postgres is quiescent.
+      - ./data/pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-diet_owner} -d ${POSTGRES_DB:-diet}"]
       interval: 5s
@@ -77,7 +80,8 @@ services:
       - ./secrets:/run/secrets:ro
       # Also here, so an ad-hoc `docker compose exec app python -m app.poller`
       # archives payloads instead of silently discarding them.
-      - garminraw:/var/log/diet/garmin
+      # Must be owned by uid 10001: sudo chown 10001:10001 data/garminraw
+      - ./data/garminraw:/var/log/diet/garmin
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${APP_PORT:-8080}:8080"
 
@@ -112,7 +116,8 @@ services:
       TZ: ${TZ:-UTC}
     volumes:
       - ./secrets:/run/secrets:ro
-      - garminraw:/var/log/diet/garmin
+      # Must be owned by uid 10001: sudo chown 10001:10001 data/garminraw
+      - ./data/garminraw:/var/log/diet/garmin
     # entrypoint rather than command, so `docker compose run --rm poller --once
     # --days 30` appends flags instead of replacing the whole command line.
     entrypoint: ["python", "-m", "app.poller"]
@@ -126,7 +131,3 @@ services:
       timeout: 10s
       retries: 2
       start_period: 120s
-
-volumes:
-  pgdata:
-  garminraw:
